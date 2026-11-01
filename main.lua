@@ -913,6 +913,76 @@ local function main()
 	Explorer.EmptyTextColor = Color3.fromRGB(120,120,120)
 	Explorer.GuidesByEntry = setmetatable({}, {__mode = "k"}) -- Row -> its indent guide frames
 
+	-- Type filters for the tree
+	Explorer.Filters = {
+		{Name = "Scripts", Test = function(o) return o:IsA("LuaSourceContainer") end},
+		{Name = "LocalScripts", Test = function(o) return o:IsA("LocalScript") end},
+		{Name = "ModuleScripts", Test = function(o) return o:IsA("ModuleScript") end},
+		{Name = "Parts", Test = function(o) return o:IsA("BasePart") end},
+		{Name = "Models", Test = function(o) return o:IsA("Model") end},
+		{Name = "GUIs", Test = function(o) return o:IsA("GuiObject") end},
+		{Name = "Values", Test = function(o) return o:IsA("ValueBase") end},
+		{Name = "Remotes", Test = function(o) return o:IsA("RemoteEvent") or o:IsA("RemoteFunction") or o:IsA("UnreliableRemoteEvent") or o:IsA("BindableEvent") or o:IsA("BindableFunction") end},
+		{Name = "Sounds", Test = function(o) return o:IsA("Sound") end},
+		{Name = "Folders", Test = function(o) return o.ClassName == "Folder" end},
+		{Name = "ClickDetectors", Test = function(o) return o:IsA("ClickDetector") end},
+	}
+	Explorer.FilterGroup = nil
+
+	Explorer.RefreshFilterMenu = function()
+		local active = Explorer.FilterGroup ~= nil
+		local glyphs = Explorer.FilterGlyphs
+		if glyphs then
+			local color = active and Explorer.AccentColor or Color3.fromRGB(150,150,150)
+			for i = 1,#glyphs do
+				glyphs[i].BackgroundColor3 = color
+			end
+		end
+		if Explorer.FilterStroke then
+			Explorer.FilterStroke.Color = active and Explorer.AccentColor or Color3.fromRGB(58,58,58)
+		end
+		local rows = Explorer.FilterRows
+		if rows then
+			for i = 1,#rows do
+				local row = rows[i]
+				local isActive = (row.Group == Explorer.FilterGroup)
+				row.Button.TextColor3 = isActive and Explorer.AccentColor or Color3.fromRGB(210,210,210)
+				row.Button.Text = (isActive and "• " or "   ")..row.Name
+			end
+		end
+	end
+
+	Explorer.ToggleFilterMenu = function(state)
+		local menu = Explorer.FilterMenu
+		if not menu then return end
+		if state == nil then state = not menu.Visible end
+		menu.Visible = state
+		if state then Explorer.RefreshFilterMenu() end
+	end
+
+	Explorer.SetFilter = function(group)
+		Explorer.FilterGroup = group
+		Explorer.ClearSearch()
+		Explorer.RefreshFilterMenu()
+		Explorer.ForceUpdate()
+	end
+
+	-- True when the selection is, or contains, a ClickDetector
+	Explorer.HasClickDetector = function()
+		local sList = selection and selection.List
+		if not sList then return false end
+		for i = 1,#sList do
+			local obj = sList[i].Obj
+			if obj then
+				if obj:IsA("ClickDetector") then return true end
+				for _,d in ipairs(obj:GetDescendants()) do
+					if d:IsA("ClickDetector") then return true end
+				end
+			end
+		end
+		return false
+	end
+
 	addObject = function(root)
 		if nodes[root] then return end
 
@@ -1236,6 +1306,35 @@ local function main()
 
 	Explorer.Update = function()
 		table.clear(tree)
+
+		if Explorer.FilterGroup then
+			-- Re-use the search machinery: mark matching nodes and auto-expand their parents
+			table.clear(Explorer.SearchExpanded)
+			table.clear(searchResults)
+			expanded = Explorer.SearchExpanded
+			local expandTable = Explorer.SearchExpanded
+			local test = Explorer.FilterGroup.Test
+			local function markFilter(root)
+				for i = 1,#root do
+					local node = root[i]
+					if not node.Del and test(node.Obj) then
+						expandTable[node] = 0
+						searchResults[node] = true
+						local parnode = node.Parent
+						while parnode do
+							expandTable[parnode] = true
+							searchResults[parnode] = true
+							parnode = parnode.Parent
+						end
+					end
+					if #node > 0 then markFilter(node) end
+				end
+			end
+			markFilter(nodes[game])
+			if nilNode then markFilter(nilNode) end
+		elseif not searchFunc and expanded == Explorer.SearchExpanded then
+			expanded = Explorer.Expanded
+		end
 		local maxNameWidth,maxDepth,count = 0,1,1
 		local nameCache = {}
 		local font = Enum.Font.SourceSans
@@ -1534,7 +1633,7 @@ local function main()
 
 		if Explorer.EmptyLabel then
 			Explorer.EmptyLabel.Visible = (#tree == 0)
-			Explorer.EmptyLabel.Text = isSearching and "No matches for this search" or "Nothing to show"
+			Explorer.EmptyLabel.Text = isSearching and (Explorer.FilterGroup and "Nothing in this filter" or "No matches for this search") or "Nothing to show"
 		end
 
 		for i = 1,maxNodes do
@@ -1976,7 +2075,7 @@ local function main()
 		end
 
 		if presentClasses["TouchTransmitter"] then context:AddRegistered("FIRE_TOUCHTRANSMITTER", firetouchinterest == nil) end
-		if presentClasses["ClickDetector"] then context:AddRegistered("FIRE_CLICKDETECTOR", fireclickdetector == nil) end
+		if presentClasses["ClickDetector"] or Explorer.HasClickDetector() then context:AddRegistered("FIRE_CLICKDETECTOR", fireclickdetector == nil) end
 		if presentClasses["ProximityPrompt"] then context:AddRegistered("FIRE_PROXIMITYPROMPT", fireproximityprompt == nil) end
 		
 		
@@ -2533,10 +2632,21 @@ local function main()
 			for _, v in ipairs(selection.List) do if v.Obj and v.Obj:IsA("TouchTransmitter") then firetouchinterest(hrp, v.Obj.Parent, 0) end end
 		end})
 
-		context:Register("FIRE_CLICKDETECTOR",{Name = "Fire ClickDetector", OnClick = function()
-			local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
-			if not hrp then return end
-			for _, v in ipairs(selection.List) do if v.Obj and v.Obj:IsA("ClickDetector") then fireclickdetector(v.Obj) end end
+		context:Register("FIRE_CLICKDETECTOR",{Name = "Fire ClickDetector(s)", OnClick = function()
+			if not fireclickdetector then return end
+			-- Fire the selected detectors, plus any inside a selected part, model or folder
+			for _, v in ipairs(selection.List) do
+				local obj = v.Obj
+				if obj then
+					if obj:IsA("ClickDetector") then
+						fireclickdetector(obj)
+					else
+						for _, d in ipairs(obj:GetDescendants()) do
+							if d:IsA("ClickDetector") then fireclickdetector(d) end
+						end
+					end
+				end
+			end
 		end})
 
 		context:Register("FIRE_PROXIMITYPROMPT",{Name = "Fire ProximityPrompt", OnClick = function()
@@ -3179,6 +3289,10 @@ return search]==]
 	end
 
 	Explorer.DoSearch = function(query)
+		if Explorer.FilterGroup then
+			Explorer.FilterGroup = nil
+			Explorer.RefreshFilterMenu()
+		end
 		table.clear(Explorer.SearchExpanded)
 		table.clear(searchResults)
 		expanded = (#query == 0 and Explorer.Expanded or Explorer.SearchExpanded)
@@ -3575,7 +3689,7 @@ return search]==]
 			{1,"Folder",{Name="ExplorerItems",}},
 			{2,"Frame",{BackgroundColor3=Color3.fromRGB(38,38,38),BorderSizePixel=0,Name="ToolBar",Parent={1},Size=UDim2.new(1,0,0,tbH),}},
 			{3,"Frame",{BackgroundColor3=Color3.fromRGB(52,52,52),BorderSizePixel=0,Name="ToolBarLine",Parent={2},Position=UDim2.new(0,0,1,-1),Size=UDim2.new(1,0,0,1),}},
-			{4,"Frame",{BackgroundColor3=Color3.fromRGB(30,30,30),BorderSizePixel=0,Name="SearchFrame",Parent={2},Position=UDim2.new(0,6,0,4),Size=UDim2.new(1,-12,0,22),}},
+			{4,"Frame",{BackgroundColor3=Color3.fromRGB(30,30,30),BorderSizePixel=0,Name="SearchFrame",Parent={2},Position=UDim2.new(0,6,0,4),Size=UDim2.new(1,-46,0,22),}},
 			{5,"UICorner",{CornerRadius=UDim.new(0,5),Parent={4},}},
 			{6,"UIStroke",{Thickness=1,Parent={4},Color=Color3.fromRGB(58,58,58)}},
 			{7,"TextBox",{BackgroundTransparency=1,ClearTextOnFocus=false,Font=3,Name="SearchBox",Parent={4},PlaceholderColor3=Color3.fromRGB(120,120,120),PlaceholderText="Search workspace",Position=UDim2.new(0,8,0,0),Size=UDim2.new(1,-52,0,22),Text="",TextColor3=Color3.fromRGB(235,235,235),TextSize=13,TextXAlignment=0,}},
@@ -3584,7 +3698,13 @@ return search]==]
 			{10,"TextButton",{AutoButtonColor=false,BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Refresh",Parent={2},Position=UDim2.new(1,-42,0,6),Size=UDim2.new(0,18,0,18),Text="",TextSize=14,Visible=false,}},
 			{11,"ImageLabel",{BackgroundTransparency=1,Image="rbxassetid://5642310344",Parent={10},Position=UDim2.new(0,3,0,3),Size=UDim2.new(0,12,0,12),}},
 			{12,"Frame",{BackgroundColor3=Color3.fromRGB(38,38,38),BorderSizePixel=0,Name="ScrollCorner",Parent={1},Position=UDim2.new(1,-16,1,-16),Size=UDim2.new(0,16,0,16),Visible=false,}},
-			{13,"Frame",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ClipsDescendants=true,Name="List",Parent={1},Position=UDim2.new(0,0,0,tbH+1),Size=UDim2.new(1,0,1,-(tbH+1)),}}
+			{13,"Frame",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ClipsDescendants=true,Name="List",Parent={1},Position=UDim2.new(0,0,0,tbH+1),Size=UDim2.new(1,0,1,-(tbH+1)),}},
+			{14,"TextButton",{AutoButtonColor=false,BackgroundTransparency=1,BorderSizePixel=0,Name="FilterButton",Parent={2},Position=UDim2.new(1,-38,0,4),Size=UDim2.new(0,30,0,22),Text="",TextSize=14,}},
+			{15,"UICorner",{CornerRadius=UDim.new(0,5),Parent={14},}},
+			{16,"UIStroke",{Thickness=1,Parent={14},Color=Color3.fromRGB(58,58,58)}},
+			{17,"Frame",{BackgroundColor3=Color3.fromRGB(150,150,150),BorderSizePixel=0,Name="Glyph1",Parent={14},Position=UDim2.new(0,6,0,6),Size=UDim2.new(0,18,0,2),}},
+			{18,"Frame",{BackgroundColor3=Color3.fromRGB(150,150,150),BorderSizePixel=0,Name="Glyph2",Parent={14},Position=UDim2.new(0,9,0,10),Size=UDim2.new(0,12,0,2),}},
+			{19,"Frame",{BackgroundColor3=Color3.fromRGB(150,150,150),BorderSizePixel=0,Name="Glyph3",Parent={14},Position=UDim2.new(0,12,0,14),Size=UDim2.new(0,6,0,2),}},
 		})
 
 		toolBar = explorerItems.ToolBar
@@ -3634,6 +3754,70 @@ return search]==]
 			Text = "Nothing to show",
 			Visible = false
 		})
+
+		-- Type filter button + dropdown
+		local filterButton = explorerItems.FilterButton
+		Explorer.FilterGlyphs = {filterButton.Glyph1,filterButton.Glyph2,filterButton.Glyph3}
+		Explorer.FilterStroke = filterButton:FindFirstChild("UIStroke")
+
+		local filterRows = {{Name = "All"}}
+		for i = 1,#Explorer.Filters do
+			filterRows[#filterRows+1] = Explorer.Filters[i]
+		end
+
+		Explorer.FilterMenu = create({
+			{1,"Frame",{BackgroundColor3=Color3.fromRGB(32,32,32),BorderSizePixel=0,Name="FilterMenu",Parent=window.GuiElems.Content,Position=UDim2.new(1,-166,0,tbH+2),Size=UDim2.new(0,160,0,#filterRows*23+10),Visible=false,ZIndex=50}},
+			{2,"UICorner",{CornerRadius=UDim.new(0,6),Parent={1},}},
+			{3,"UIStroke",{Thickness=1,Parent={1},Color=Color3.fromRGB(64,64,64)}},
+			{4,"Frame",{BackgroundTransparency=1,Name="Holder",Parent={1},Size=UDim2.new(1,0,1,0),ZIndex=50,}},
+			{5,"UIListLayout",{Parent={4},Padding=UDim.new(0,1),SortOrder=Enum.SortOrder.LayoutOrder,}},
+			{6,"UIPadding",{Parent={4},PaddingTop=UDim.new(0,5),PaddingBottom=UDim.new(0,5),PaddingLeft=UDim.new(0,5),PaddingRight=UDim.new(0,5),}},
+		})
+
+		local filterHolder = Explorer.FilterMenu.Holder
+		Explorer.FilterRows = {}
+
+		for i = 1,#filterRows do
+			local item = filterRows[i]
+			local row = createSimple("TextButton",{
+				AutoButtonColor = false,
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				Font = Enum.Font.SourceSans,
+				LayoutOrder = i,
+				Name = "Row"..i,
+				Parent = filterHolder,
+				Size = UDim2.new(1,0,0,22),
+				Text = "   "..item.Name,
+				TextColor3 = Color3.fromRGB(210,210,210),
+				TextSize = 13,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				ZIndex = 51
+			})
+
+			row.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseMovement then
+					row.BackgroundColor3 = Color3.fromRGB(48,48,48)
+					row.BackgroundTransparency = 0.2
+				end
+			end)
+			row.InputEnded:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseMovement then
+					row.BackgroundTransparency = 1
+				end
+			end)
+			row.MouseButton1Click:Connect(function()
+				Explorer.SetFilter(item.Test and item or nil)
+				Explorer.ToggleFilterMenu(false)
+			end)
+
+			Explorer.FilterRows[i] = {Button = row, Group = (item.Test and item or nil), Name = item.Name}
+		end
+
+		filterButton.MouseButton1Click:Connect(function()
+			Explorer.ToggleFilterMenu(nil)
+		end)
+		Explorer.RefreshFilterMenu()
 
 		-- Init stuff that requires the window
 		Explorer.InitRenameBox()
