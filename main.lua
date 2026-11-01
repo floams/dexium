@@ -900,6 +900,18 @@ local function main()
 	local remote_blocklist = {} -- list of remotes beng blocked, k = the remote instance, v = their old function :3
 	nodes = nodes or {}
 
+	-- Layout / palette constants for the explorer
+	Explorer.RowHeight = 24 -- Height of a single tree row
+	Explorer.ToolBarHeight = 30 -- Height of the search bar area
+	Explorer.GuideCount = 8 -- Max amount of indent guide lines drawn per row
+	Explorer.RowTextColor = Color3.fromRGB(214,214,214)
+	Explorer.RowTextColorSelected = Color3.fromRGB(255,255,255)
+	Explorer.ClassTextColor = Color3.fromRGB(128,128,128)
+	Explorer.AccentColor = Color3.fromRGB(0,170,255)
+	Explorer.StripeColor = Color3.fromRGB(54,54,54)
+	Explorer.GuideColor = Color3.fromRGB(62,62,62)
+	Explorer.EmptyTextColor = Color3.fromRGB(120,120,120)
+
 	addObject = function(root)
 		if nodes[root] then return end
 
@@ -1154,7 +1166,9 @@ local function main()
 	end
 
 	Explorer.UpdateView = function()
-		local maxNodes = math.ceil(treeFrame.AbsoluteSize.Y / 20)
+		local rowHeight = Explorer.RowHeight
+		local topOffset = Explorer.ToolBarHeight + 1
+		local maxNodes = math.ceil(treeFrame.AbsoluteSize.Y / rowHeight)
 		local maxX = treeFrame.AbsoluteSize.X
 		local totalWidth = Explorer.ViewWidth + Explorer.FreeWidth
 
@@ -1167,21 +1181,21 @@ local function main()
 		scrollH.Gui.Visible = totalWidth > maxX
 
 		local oldSize = treeFrame.Size
-		treeFrame.Size = UDim2.new(1,(scrollV.Gui.Visible and -16 or 0),1,(scrollH.Gui.Visible and -39 or -23))
+		treeFrame.Size = UDim2.new(1,(scrollV.Gui.Visible and -16 or 0),1,-(scrollH.Gui.Visible and topOffset+16 or topOffset))
 		if oldSize ~= treeFrame.Size then
 			Explorer.UpdateView()
 		else
 			scrollV:Update()
 			scrollH:Update()
 
-			renameBox.Size = UDim2.new(0,maxX-100,0,16)
+			renameBox.Size = UDim2.new(0,maxX-100,0,rowHeight-8)
 
 			if scrollV.Gui.Visible and scrollH.Gui.Visible then
-				scrollV.Gui.Size = UDim2.new(0,16,1,-39)
+				scrollV.Gui.Size = UDim2.new(0,16,1,-(topOffset+16))
 				scrollH.Gui.Size = UDim2.new(1,-16,0,16)
 				Explorer.Window.GuiElems.Content.ScrollCorner.Visible = true
 			else
-				scrollV.Gui.Size = UDim2.new(0,16,1,-23)
+				scrollV.Gui.Size = UDim2.new(0,16,1,-topOffset)
 				scrollH.Gui.Size = UDim2.new(1,0,0,16)
 				Explorer.Window.GuiElems.Content.ScrollCorner.Visible = false
 			end
@@ -1305,6 +1319,8 @@ local function main()
 				local clone = v:Clone()
 				clone.Active = false
 				clone.Indent.Expand.Visible = false
+				clone.Indent.Accent.Visible = false
+				clone.Class.Visible = false
 				clone.Parent = dragTree
 			end
 		end
@@ -1333,7 +1349,7 @@ local function main()
 				local entry = listEntries[i]
 				if Lib.CheckMouseInGui(entry) then
 					dragOutline.Position = UDim2.new(0,entry.Indent.Position.X.Offset-scrollH.Index,0,entry.Position.Y.Offset)
-					dragOutline.Size = UDim2.new(0,entry.Size.X.Offset-entry.Indent.Position.X.Offset,0,20)
+					dragOutline.Size = UDim2.new(0,entry.Size.X.Offset-entry.Indent.Position.X.Offset,0,Explorer.RowHeight)
 					dragOutline.Visible = true
 					return
 				end
@@ -1381,7 +1397,13 @@ local function main()
 
 	Explorer.NewListEntry = function(index)
 		local newEntry = entryTemplate:Clone()
-		newEntry.Position = UDim2.new(0,0,0,20*(index-1))
+		newEntry.Position = UDim2.new(0,0,0,Explorer.RowHeight*(index-1))
+
+		local guides = {}
+		for i = 1,Explorer.GuideCount do
+			guides[i] = newEntry:FindFirstChild("Guide"..i)
+		end
+		newEntry.Guides = guides
 
 		local isRenaming = false
 
@@ -1501,9 +1523,18 @@ local function main()
 	end
 
 	Explorer.Refresh = function()
-		local maxNodes = math.max(math.ceil((treeFrame.AbsoluteSize.Y) / 20), 0)	
+		local rowHeight = Explorer.RowHeight
+		local maxNodes = math.max(math.ceil((treeFrame.AbsoluteSize.Y) / rowHeight), 0)	
 		local renameNodeVisible = false
 		local isa = game.IsA
+		local isSearching = (expanded == Explorer.SearchExpanded)
+		local viewWidth = treeFrame.AbsoluteSize.X
+		local classSpace = math.floor(math.min(150,math.max(0,viewWidth*0.32)))
+
+		if Explorer.EmptyLabel then
+			Explorer.EmptyLabel.Visible = (#tree == 0)
+			Explorer.EmptyLabel.Text = isSearching and "No matches for this search" or "Nothing to show"
+		end
 
 		for i = 1,maxNodes do
 			local entry = listEntries[i]
@@ -1512,26 +1543,64 @@ local function main()
 			local node = tree[i + Explorer.Index]
 			if node then
 				local obj = node.Obj
-				local depth = Explorer.EntryIndent*Explorer.NodeDepth(node)
+				local levels = Explorer.NodeDepth(node)
+				local depth = Explorer.EntryIndent*levels
+				local selected = selection.Map[node]
 
 				entry.Visible = true
-				entry.Position = UDim2.new(0,-scrollH.Index,0,entry.Position.Y.Offset)
-				entry.Size = UDim2.new(0,Explorer.ViewWidth,0,20)
+				entry.Position = UDim2.new(0,-scrollH.Index,0,rowHeight*(i-1))
+				entry.Size = UDim2.new(0,Explorer.ViewWidth,0,rowHeight)
+
+				-- Faint striping so a row is easy to follow across deep trees
+				if (i + Explorer.Index) % 2 == 0 then
+					entry.BackgroundColor3 = Explorer.StripeColor
+					entry.BackgroundTransparency = 0.45
+				else
+					entry.BackgroundTransparency = 1
+				end
+
+				-- Indent guides for every level above this node
+				local guides = entry.Guides
+				local guideMax = math.min(levels-1,Explorer.GuideCount)
+				for g = 1,Explorer.GuideCount do
+					local guide = guides and guides[g]
+					if guide then
+						guide.Visible = g <= guideMax
+						if g <= guideMax then
+							guide.Position = UDim2.new(0,Explorer.EntryIndent*g,0,0)
+						end
+					end
+				end
+
 				entry.Indent.EntryName.Text = tostring(node.Obj)
-				entry.Indent.Position = UDim2.new(0,depth,0,0)
-				entry.Indent.Size = UDim2.new(1,-depth,1,0)
+				entry.Indent.EntryName.TextColor3 = selected and Explorer.RowTextColorSelected or Explorer.RowTextColor
+				entry.Indent.EntryName.Font = selected and Enum.Font.SourceSansBold or Enum.Font.SourceSans
+				entry.Indent.EntryName.Size = UDim2.new(1,-(34+classSpace),1,0)
+				entry.Indent.Position = UDim2.new(0,depth,0,1)
+				entry.Indent.Size = UDim2.new(1,-(depth+6),1,-2)
 
 				entry.Indent.EntryName.TextTruncate = (Settings.Explorer.UseNameWidth and Enum.TextTruncate.None or Enum.TextTruncate.AtEnd)
 
+				-- Dim class name pinned to the visible right edge of the tree
+				entry.Class.Text = obj.ClassName
+				entry.Class.Visible = classSpace > 40
+				entry.Class.Position = UDim2.new(0,scrollH.Index+viewWidth-12,0,0)
+				entry.Class.Size = UDim2.new(0,classSpace,1,0)
+				entry.Class.TextColor3 = selected and Explorer.RowTextColorSelected or Explorer.ClassTextColor
+				entry.Class.TextTransparency = selected and 0.35 or 0.1
+
 				Explorer.MiscIcons:DisplayExplorerIcons(entry.Indent.Icon, obj.ClassName)
 
-				if selection.Map[node] then
+				if selected then
 					entry.Indent.BackgroundColor3 = Settings.Theme.ListSelection
 					entry.Indent.BorderSizePixel = 0
 					entry.Indent.BackgroundTransparency = 0
+					entry.Indent.Accent.Visible = true
 				else
+					entry.Indent.Accent.Visible = false
 					if Lib.CheckMouseInGui(entry) then
 						entry.Indent.BackgroundColor3 = Settings.Theme.Button
+						entry.Indent.BackgroundTransparency = 0.15
 					else
 						entry.Indent.BackgroundTransparency = 1
 					end
@@ -1539,7 +1608,7 @@ local function main()
 
 				if node == renamingNode then
 					renameNodeVisible = true
-					renameBox.Position = UDim2.new(0,depth+25-scrollH.Index,0,entry.Position.Y.Offset+2)
+					renameBox.Position = UDim2.new(0,depth+28-scrollH.Index,0,entry.Position.Y.Offset+4)
 					renameBox.Visible = true
 				end
 
@@ -3189,7 +3258,9 @@ return search]==]
 	end
 
 	Explorer.InitSearch = function()
-		local searchBox = Explorer.GuiElems.ToolBar.SearchFrame.SearchBox
+		local searchFrame = Explorer.GuiElems.ToolBar.SearchFrame
+		local searchBox = searchFrame.SearchBox
+		local stroke = searchFrame:FindFirstChild("UIStroke")
 		Explorer.GuiElems.SearchBar = searchBox
 
 		Lib.ViewportTextBox.convert(searchBox)
@@ -3197,17 +3268,47 @@ return search]==]
 		searchBox.FocusLost:Connect(function()
 			Explorer.DoSearch(searchBox.Text)
 		end)
+
+		searchBox.Focused:Connect(function()
+			if stroke then
+				stroke.Color = Explorer.AccentColor
+				stroke.Transparency = 0.2
+			end
+		end)
+		searchBox.FocusLost:Connect(function()
+			if stroke then
+				stroke.Color = Color3.fromRGB(58,58,58)
+				stroke.Transparency = 0
+			end
+		end)
+
+		searchFrame.Reset.MouseButton1Click:Connect(function()
+			searchBox.Text = ""
+			Explorer.DoSearch("")
+		end)
 	end
 
 	Explorer.InitEntryTemplate = function()
-		entryTemplate = create({
-			{1,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0,0,0),BackgroundTransparency=1,BorderColor3=Color3.new(0,0,0),Font=3,Name="Entry",Position=UDim2.new(0,1,0,1),Size=UDim2.new(0,250,0,20),Text="",TextSize=14,}},
-			{2,"Frame",{BackgroundColor3=Color3.new(0.04313725605607,0.35294118523598,0.68627452850342),BackgroundTransparency=1,BorderColor3=Color3.new(0.33725491166115,0.49019610881805,0.73725491762161),BorderSizePixel=0,Name="Indent",Parent={1},Position=UDim2.new(0,20,0,0),Size=UDim2.new(1,-20,1,0),}},
-			{3,"TextLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Font=3,Name="EntryName",Parent={2},Position=UDim2.new(0,26,0,0),Size=UDim2.new(1,-26,1,0),Text="Workspace",TextColor3=Color3.new(0.86274516582489,0.86274516582489,0.86274516582489),TextSize=14,TextXAlignment=0,}},
-			{4,"TextButton",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ClipsDescendants=true,Font=3,Name="Expand",Parent={2},Position=UDim2.new(0,-20,0,0),Size=UDim2.new(0,20,0,20),Text="",TextSize=14,}},
-			{5,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5642383285",ImageRectOffset=Vector2.new(144,16),ImageRectSize=Vector2.new(16,16),Name="Icon",Parent={4},Position=UDim2.new(0,2,0,2),ScaleType=4,Size=UDim2.new(0,16,0,16),}},
-			{6,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ImageRectOffset=Vector2.new(304,0),ImageRectSize=Vector2.new(16,16),Name="Icon",Parent={2},Position=UDim2.new(0,4,0,2),ScaleType=4,Size=UDim2.new(0,16,0,16),}},
-		})
+		local rowHeight = Explorer.RowHeight
+
+		local template = {
+			{1,"TextButton",{AutoButtonColor=false,BackgroundColor3=Explorer.StripeColor,BackgroundTransparency=1,BorderColor3=Color3.new(0,0,0),BorderSizePixel=0,Font=3,Name="Entry",Position=UDim2.new(0,1,0,1),Selectable=false,Size=UDim2.new(0,250,0,rowHeight),Text="",TextSize=14,}},
+			{2,"Frame",{BackgroundColor3=Color3.fromRGB(11,90,175),BackgroundTransparency=1,BorderColor3=Color3.new(0,0,0),BorderSizePixel=0,Name="Indent",Parent={1},Position=UDim2.new(0,20,0,1),Size=UDim2.new(1,-26,1,-2),}},
+			{3,"Frame",{BackgroundColor3=Explorer.AccentColor,BorderSizePixel=0,Name="Accent",Parent={2},Position=UDim2.new(0,0,0,3),Size=UDim2.new(0,2,1,-6),Visible=false,}},
+			{4,"UICorner",{CornerRadius=UDim.new(0,1),Parent={3},}},
+			{5,"UICorner",{CornerRadius=UDim.new(0,4),Parent={2},}},
+			{6,"TextLabel",{BackgroundTransparency=1,Font=3,Name="EntryName",Parent={2},Position=UDim2.new(0,28,0,0),Size=UDim2.new(1,-34,1,0),Text="Workspace",TextColor3=Explorer.RowTextColor,TextSize=14,TextXAlignment=0,}},
+			{7,"TextButton",{AutoButtonColor=false,BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Expand",Parent={2},Position=UDim2.new(0,-20,0,2),Size=UDim2.new(0,20,0,20),Text="",TextSize=14,}},
+			{8,"ImageLabel",{BackgroundTransparency=1,Image="rbxassetid://5642383285",ImageRectOffset=Vector2.new(144,16),ImageRectSize=Vector2.new(16,16),Name="Icon",Parent={7},Position=UDim2.new(0,2,0,2),ScaleType=4,Size=UDim2.new(0,16,0,16),}},
+			{9,"ImageLabel",{BackgroundTransparency=1,ImageRectOffset=Vector2.new(304,0),ImageRectSize=Vector2.new(16,16),Name="Icon",Parent={2},Position=UDim2.new(0,7,0,3),ScaleType=4,Size=UDim2.new(0,16,0,16),}},
+			{10,"TextLabel",{AnchorPoint=Vector2.new(1,0),BackgroundTransparency=1,Font=3,Name="Class",Parent={1},Position=UDim2.new(1,-10,0,0),Size=UDim2.new(0,150,1,0),Text="",TextColor3=Explorer.ClassTextColor,TextSize=12,TextXAlignment=1,}},
+		}
+
+		for i = 1,Explorer.GuideCount do
+			template[#template+1] = {10+i,"Frame",{BackgroundColor3=Explorer.GuideColor,BackgroundTransparency=0.35,BorderSizePixel=0,Name="Guide"..i,Parent={1},Size=UDim2.new(0,1,1,0),ZIndex=0,}}
+		end
+
+		entryTemplate = create(template)
 
 		local sys = Lib.ClickSystem.new()
 		sys.AllowedButtons = {1,2}
@@ -3467,19 +3568,22 @@ return search]==]
 		nilNode.Obj.Name = "Nil Instances"
 		nilNode.Locked = true
 
+		local tbH = Explorer.ToolBarHeight
+
 		local explorerItems = create({
 			{1,"Folder",{Name="ExplorerItems",}},
-			{2,"Frame",{BackgroundColor3=Color3.new(0.20392157137394,0.20392157137394,0.20392157137394),BorderSizePixel=0,Name="ToolBar",Parent={1},Size=UDim2.new(1,0,0,22),}},
-			{3,"Frame",{BackgroundColor3=Color3.new(0.14901961386204,0.14901961386204,0.14901961386204),BorderColor3=Color3.new(0.1176470592618,0.1176470592618,0.1176470592618),BorderSizePixel=0,Name="SearchFrame",Parent={2},Position=UDim2.new(0,3,0,1),Size=UDim2.new(1,-6,0,18),}},
-			{4,"TextBox",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ClearTextOnFocus=false,Font=3,Name="SearchBox",Parent={3},PlaceholderColor3=Color3.new(0.39215689897537,0.39215689897537,0.39215689897537),PlaceholderText="Search workspace",Position=UDim2.new(0,4,0,0),Size=UDim2.new(1,-24,0,18),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,TextXAlignment=0,}},
-			{5,"UICorner",{CornerRadius=UDim.new(0,2),Parent={3},}},
-			{6,"UIStroke",{Thickness=1.4,Parent={3},Color=Color3.fromRGB(42,42,42)}},
-			{7,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.12549020349979,0.12549020349979,0.12549020349979),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Reset",Parent={3},Position=UDim2.new(1,-17,0,1),Size=UDim2.new(0,16,0,16),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,}},
-			{8,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5034718129",ImageColor3=Color3.new(0.39215686917305,0.39215686917305,0.39215686917305),Parent={7},Size=UDim2.new(0,16,0,16),}},
-			{9,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.12549020349979,0.12549020349979,0.12549020349979),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Refresh",Parent={2},Position=UDim2.new(1,-20,0,1),Size=UDim2.new(0,18,0,18),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,Visible=false,}},
-			{10,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5642310344",Parent={9},Position=UDim2.new(0,3,0,3),Size=UDim2.new(0,12,0,12),}},
-			{11,"Frame",{BackgroundColor3=Color3.new(0.15686275064945,0.15686275064945,0.15686275064945),BorderSizePixel=0,Name="ScrollCorner",Parent={1},Position=UDim2.new(1,-16,1,-16),Size=UDim2.new(0,16,0,16),Visible=false,}},
-			{12,"Frame",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ClipsDescendants=true,Name="List",Parent={1},Position=UDim2.new(0,0,0,23),Size=UDim2.new(1,0,1,-23),}}
+			{2,"Frame",{BackgroundColor3=Color3.fromRGB(38,38,38),BorderSizePixel=0,Name="ToolBar",Parent={1},Size=UDim2.new(1,0,0,tbH),}},
+			{3,"Frame",{BackgroundColor3=Color3.fromRGB(52,52,52),BorderSizePixel=0,Name="ToolBarLine",Parent={2},Position=UDim2.new(0,0,1,-1),Size=UDim2.new(1,0,0,1),}},
+			{4,"Frame",{BackgroundColor3=Color3.fromRGB(30,30,30),BorderSizePixel=0,Name="SearchFrame",Parent={2},Position=UDim2.new(0,6,0,4),Size=UDim2.new(1,-12,0,22),}},
+			{5,"UICorner",{CornerRadius=UDim.new(0,5),Parent={4},}},
+			{6,"UIStroke",{Thickness=1,Parent={4},Color=Color3.fromRGB(58,58,58)}},
+			{7,"TextBox",{BackgroundTransparency=1,ClearTextOnFocus=false,Font=3,Name="SearchBox",Parent={4},PlaceholderColor3=Color3.fromRGB(120,120,120),PlaceholderText="Search workspace",Position=UDim2.new(0,8,0,0),Size=UDim2.new(1,-52,0,22),Text="",TextColor3=Color3.fromRGB(235,235,235),TextSize=13,TextXAlignment=0,}},
+			{8,"TextButton",{AutoButtonColor=false,BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Reset",Parent={4},Position=UDim2.new(1,-20,0,3),Size=UDim2.new(0,16,0,16),Text="",TextSize=14,}},
+			{9,"ImageLabel",{BackgroundTransparency=1,Image="rbxassetid://5034718129",ImageColor3=Color3.fromRGB(140,140,140),Parent={8},Size=UDim2.new(0,16,0,16),}},
+			{10,"TextButton",{AutoButtonColor=false,BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Refresh",Parent={2},Position=UDim2.new(1,-42,0,6),Size=UDim2.new(0,18,0,18),Text="",TextSize=14,Visible=false,}},
+			{11,"ImageLabel",{BackgroundTransparency=1,Image="rbxassetid://5642310344",Parent={10},Position=UDim2.new(0,3,0,3),Size=UDim2.new(0,12,0,12),}},
+			{12,"Frame",{BackgroundColor3=Color3.fromRGB(38,38,38),BorderSizePixel=0,Name="ScrollCorner",Parent={1},Position=UDim2.new(1,-16,1,-16),Size=UDim2.new(0,16,0,16),Visible=false,}},
+			{13,"Frame",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ClipsDescendants=true,Name="List",Parent={1},Position=UDim2.new(0,0,0,tbH+1),Size=UDim2.new(1,0,1,-(tbH+1)),}}
 		})
 
 		toolBar = explorerItems.ToolBar
@@ -3490,7 +3594,7 @@ return search]==]
 
 		scrollV = Lib.ScrollBar.new()		
 		scrollV.WheelIncrement = 3
-		scrollV.Gui.Position = UDim2.new(1,-16,0,23)
+		scrollV.Gui.Position = UDim2.new(1,-16,0,tbH+1)
 		scrollV:SetScrollFrame(treeFrame)
 		scrollV.Scrolled:Connect(function()
 			Explorer.Index = scrollV.Index
@@ -3516,6 +3620,19 @@ return search]==]
 		explorerItems.ScrollCorner.Parent = window.GuiElems.Content
 		scrollV.Gui.Parent = window.GuiElems.Content
 		scrollH.Gui.Parent = window.GuiElems.Content
+
+		Explorer.EmptyLabel = createSimple("TextLabel",{
+			BackgroundTransparency = 1,
+			Name = "EmptyLabel",
+			Parent = treeFrame,
+			Position = UDim2.new(0,0,0,28),
+			Size = UDim2.new(1,0,0,20),
+			Font = Enum.Font.SourceSans,
+			TextSize = 13,
+			TextColor3 = Explorer.EmptyTextColor,
+			Text = "Nothing to show",
+			Visible = false
+		})
 
 		-- Init stuff that requires the window
 		Explorer.InitRenameBox()
