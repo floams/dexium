@@ -911,6 +911,7 @@ local function main()
 	Explorer.StripeColor = Color3.fromRGB(54,54,54)
 	Explorer.GuideColor = Color3.fromRGB(62,62,62)
 	Explorer.EmptyTextColor = Color3.fromRGB(120,120,120)
+	Explorer.GuidesByEntry = setmetatable({}, {__mode = "k"}) -- Row -> its indent guide frames
 
 	addObject = function(root)
 		if nodes[root] then return end
@@ -1403,7 +1404,7 @@ local function main()
 		for i = 1,Explorer.GuideCount do
 			guides[i] = newEntry:FindFirstChild("Guide"..i)
 		end
-		newEntry.Guides = guides
+		Explorer.GuidesByEntry[newEntry] = guides
 
 		local isRenaming = false
 
@@ -1560,7 +1561,7 @@ local function main()
 				end
 
 				-- Indent guides for every level above this node
-				local guides = entry.Guides
+				local guides = Explorer.GuidesByEntry[entry]
 				local guideMax = math.min(levels-1,Explorer.GuideCount)
 				for g = 1,Explorer.GuideCount do
 					local guide = guides and guides[g]
