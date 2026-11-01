@@ -3756,7 +3756,7 @@ return search]==]
 		})
 
 		-- Type filter button + dropdown
-		local filterButton = explorerItems.ToolBar.FilterButton
+		local filterButton = toolBar.FilterButton
 		Explorer.FilterGlyphs = {filterButton.Glyph1,filterButton.Glyph2,filterButton.Glyph3}
 		Explorer.FilterStroke = filterButton:FindFirstChild("UIStroke")
 
