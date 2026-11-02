@@ -913,6 +913,9 @@ local function main()
 	Explorer.ZoomStep = 0.1
 	Explorer.ZoomMin = 0.55
 	Explorer.ZoomMax = 1.6
+	-- Zoomed out uses slightly brighter text so it stays readable over the stripes
+	Explorer.RowTextColorSmall = Color3.fromRGB(232,232,232)
+	Explorer.ClassTextColorSmall = Color3.fromRGB(158,158,158)
 	Explorer.RowTextColor = Color3.fromRGB(214,214,214)
 	Explorer.RowTextColorSelected = Color3.fromRGB(255,255,255)
 	Explorer.ClassTextColor = Color3.fromRGB(128,128,128)
@@ -983,9 +986,11 @@ local function main()
 		if not indent then return end
 
 		local z = Explorer.Zoom
-		local font = math.max(7,math.floor(14*z + 0.5))
-		local classFont = math.max(6,math.floor(12*z + 0.5))
-		local icon = math.max(9,math.floor(16*z + 0.5))
+		-- Text shrinks more slowly than the rows do: below ~11px SourceSans turns to mush
+		local textScale = math.max(0.82,z)
+		local font = math.max(11,math.floor(14*textScale + 0.5))
+		local classFont = math.max(10,math.floor(12*textScale + 0.5))
+		local icon = math.max(10,math.floor(16*textScale + 0.5))
 		local chevron = math.max(12,math.floor(20*z + 0.5))
 		local namePad = Explorer.NamePad
 
@@ -1017,7 +1022,7 @@ local function main()
 		if math.abs(z - Explorer.Zoom) < 0.001 then return end
 
 		Explorer.Zoom = z
-		Explorer.RowHeight = math.max(12,math.floor(Explorer.BaseRowHeight*z + 0.5))
+		Explorer.RowHeight = math.max(15,math.floor(Explorer.BaseRowHeight*z + 0.5))
 		Explorer.EntryIndent = math.max(8,math.floor(Explorer.BaseEntryIndent*z + 0.5))
 		Explorer.NamePad = math.max(13,math.floor(28*z + 0.5))
 
@@ -1028,9 +1033,9 @@ local function main()
 				if typeof(entry) == "Instance" then Explorer.ApplyRowScale(entry) end
 			end
 		end
-		if renameBox then renameBox.TextSize = math.max(8,math.floor(14*z + 0.5)) end
+		if renameBox then renameBox.TextSize = math.max(11,math.floor(14*math.max(0.82,z) + 0.5)) end
 		if Explorer.EmptyLabel then
-			Explorer.EmptyLabel.TextSize = math.max(8,math.floor(13*z + 0.5))
+			Explorer.EmptyLabel.TextSize = math.max(11,math.floor(13*math.max(0.82,z) + 0.5))
 			Explorer.EmptyLabel.Position = UDim2.new(0,0,0,math.max(10,math.floor(28*z + 0.5)))
 		end
 
@@ -1750,6 +1755,10 @@ local function main()
 
 	Explorer.Refresh = function()
 		local rowHeight = Explorer.RowHeight
+		local smallText = Explorer.Zoom < 0.9
+		local nameFont = smallText and Enum.Font.SourceSansSemibold or Enum.Font.SourceSans
+		local nameColor = smallText and Explorer.RowTextColorSmall or Explorer.RowTextColor
+		local classColor = smallText and Explorer.ClassTextColorSmall or Explorer.ClassTextColor
 		local maxNodes = math.max(math.ceil((treeFrame.AbsoluteSize.Y) / rowHeight), 0)	
 		local renameNodeVisible = false
 		local isa = game.IsA
@@ -1799,8 +1808,8 @@ local function main()
 				end
 
 				entry.Indent.EntryName.Text = tostring(node.Obj)
-				entry.Indent.EntryName.TextColor3 = selected and Explorer.RowTextColorSelected or Explorer.RowTextColor
-				entry.Indent.EntryName.Font = selected and Enum.Font.SourceSansBold or Enum.Font.SourceSans
+				entry.Indent.EntryName.TextColor3 = selected and Explorer.RowTextColorSelected or nameColor
+				entry.Indent.EntryName.Font = selected and Enum.Font.SourceSansBold or nameFont
 				entry.Indent.EntryName.Size = UDim2.new(1,-(Explorer.NamePad+6+classSpace),1,0)
 				entry.Indent.Position = UDim2.new(0,depth,0,1)
 				entry.Indent.Size = UDim2.new(1,-(depth+6),1,-2)
@@ -1812,8 +1821,8 @@ local function main()
 				entry.Class.Visible = classSpace > 40
 				entry.Class.Position = UDim2.new(0,scrollH.Index+viewWidth-12,0,0)
 				entry.Class.Size = UDim2.new(0,classSpace,1,0)
-				entry.Class.TextColor3 = selected and Explorer.RowTextColorSelected or Explorer.ClassTextColor
-				entry.Class.TextTransparency = selected and 0.35 or 0.1
+				entry.Class.TextColor3 = selected and Explorer.RowTextColorSelected or classColor
+				entry.Class.TextTransparency = selected and 0.35 or (smallText and 0 or 0.1)
 
 				Explorer.MiscIcons:DisplayExplorerIcons(entry.Indent.Icon, obj.ClassName)
 
