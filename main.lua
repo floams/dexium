@@ -13972,7 +13972,8 @@ end
 local function main()
 	local ClickFire = {}
 
-	local window, listFrame, statusLabel, searchBox
+	local window, listFrame, statusLabel, searchBox, loopCheckbox, intervalBox
+	local loopGen = 0
 	local rows = {}
 	local found = {}
 	local checked = {}
@@ -13981,6 +13982,8 @@ local function main()
 	local filterToken = 0
 
 	ClickFire.Delay = 0 -- seconds to wait between fires, 0 only yields every 10
+	ClickFire.Loop = false -- re-fire the ticked detectors until switched off
+	ClickFire.LoopInterval = 0.5 -- seconds between loop passes
 	ClickFire.MaxScan = 5000 -- stop collecting after this many detectors
 	ClickFire.MaxRows = 250 -- rows rendered at once, the rest stay selectable
 
@@ -14230,30 +14233,39 @@ local function main()
 		rebuild()
 	end
 
-	ClickFire.Fire = function()
-		if firing then return end
-
+	local function collectTargets()
 		local targets = {}
 		for det in next,checked do
 			if isAlive(det) then targets[#targets+1] = det end
 		end
+		return targets
+	end
 
+	local function canFire()
+		return (getFireFunc() ~= nil) or (getConnsFunc() ~= nil)
+	end
+
+	ClickFire.Fire = function()
+		if firing or ClickFire.Loop then return end
+
+		local targets = collectTargets()
 		if #targets == 0 then
 			setStatus("Nothing selected to fire")
 			return
 		end
 
-		if not getFireFunc() and not getConnsFunc() then
+		if not canFire() then
 			setStatus("This executor has neither fireclickdetector nor getconnections")
 			return
 		end
 
 		firing = true
 		local total = #targets
-		local fired = 0
-		local failed = 0
 
 		coroutine.wrap(function()
+			local fired = 0
+			local failed = 0
+
 			for i = 1,total do
 				local det = targets[i]
 				if isAlive(det) then
@@ -14272,6 +14284,83 @@ local function main()
 
 			firing = false
 			setStatus(("Fired %d/%d%s"):format(fired,total,failed > 0 and (" ("..failed.." failed)") or ""))
+		end)()
+	end
+
+	-- Loop fire: keeps re-firing every ticked detector until switched off
+	ClickFire.SetLoop = function(state)
+		state = state and true or false
+
+		if not state then
+			ClickFire.Loop = false
+			loopGen = loopGen + 1
+			if loopCheckbox then loopCheckbox:SetState(false) end
+			return
+		end
+
+		if ClickFire.Loop then return end
+
+		if firing then
+			setStatus("Wait for the current fire to finish")
+			if loopCheckbox then loopCheckbox:SetState(false) end
+			return
+		end
+
+		if #collectTargets() == 0 then
+			setStatus("Nothing selected to loop fire")
+			if loopCheckbox then loopCheckbox:SetState(false) end
+			return
+		end
+
+		if not canFire() then
+			setStatus("This executor has neither fireclickdetector nor getconnections")
+			if loopCheckbox then loopCheckbox:SetState(false) end
+			return
+		end
+
+		ClickFire.Loop = true
+		loopGen = loopGen + 1
+		local generation = loopGen
+
+		coroutine.wrap(function()
+			local pass = 0
+
+			while ClickFire.Loop and generation == loopGen do
+				local targets = collectTargets()
+				if #targets == 0 then break end
+
+				pass = pass + 1
+				local fired = 0
+				local total = #targets
+
+				for i = 1,total do
+					if not ClickFire.Loop or generation ~= loopGen then break end
+
+					local det = targets[i]
+					if isAlive(det) and ClickFire.FireDetector(det) then fired = fired + 1 end
+
+					if ClickFire.Delay > 0 or i % 10 == 0 then
+						if ClickFire.Delay > 0 then task.wait(ClickFire.Delay) else task.wait() end
+						if i % 10 == 0 then setStatus(("Loop %d: %d/%d fired"):format(pass,i,total)) end
+					end
+				end
+
+				if ClickFire.Loop and generation == loopGen then
+					setStatus(("Loop %d: fired %d/%d, next in %.1fs"):format(pass,fired,total,ClickFire.LoopInterval))
+
+					local waited = 0
+					while ClickFire.Loop and generation == loopGen and waited < ClickFire.LoopInterval do
+						task.wait(0.1)
+						waited = waited + 0.1
+					end
+				end
+			end
+
+			if generation == loopGen then
+				ClickFire.Loop = false
+				if loopCheckbox then loopCheckbox:SetState(false) end
+				setStatus("Loop fire stopped")
+			end
 		end)()
 	end
 
@@ -14318,7 +14407,7 @@ local function main()
 		searchBox = Lib.ViewportTextBox.new()
 		searchBox.Gui.Parent = content
 		searchBox.Gui.Position = UDim2.new(0,0,0,26)
-		searchBox.Gui.Size = UDim2.new(1,0,0,20)
+		searchBox.Gui.Size = UDim2.new(1,-120,0,20)
 		searchBox.TextBox.PlaceholderText = "Filter by part name"
 		searchBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
 			filter = string.lower(searchBox.TextBox.Text)
@@ -14328,6 +14417,34 @@ local function main()
 			task.delay(0.12,function()
 				if token == filterToken then rebuild() end
 			end)
+		end)
+
+		loopCheckbox = Lib.Checkbox.new()
+		loopCheckbox.Gui.Parent = content
+		loopCheckbox.Gui.Position = UDim2.new(1,-116,0,28)
+		loopCheckbox.Gui.Size = UDim2.new(0,16,0,16)
+		loopCheckbox:SetState(false)
+		loopCheckbox.OnInput:Connect(function()
+			ClickFire.SetLoop(loopCheckbox.Toggled)
+		end)
+
+		local loopLabel = Lib.Label.new()
+		loopLabel.Gui.Parent = content
+		loopLabel.Gui.Position = UDim2.new(1,-98,0,26)
+		loopLabel.Gui.Size = UDim2.new(0,34,0,20)
+		loopLabel.Gui.Text = "Loop"
+		loopLabel.Gui.TextSize = 13
+
+		intervalBox = Lib.ViewportTextBox.new()
+		intervalBox.Gui.Parent = content
+		intervalBox.Gui.Position = UDim2.new(1,-62,0,26)
+		intervalBox.Gui.Size = UDim2.new(0,58,0,20)
+		intervalBox.TextBox.Text = tostring(ClickFire.LoopInterval)
+		intervalBox.TextBox.PlaceholderText = "0.5"
+		intervalBox.TextBox.FocusLost:Connect(function()
+			local seconds = tonumber(intervalBox.TextBox.Text)
+			if seconds then ClickFire.LoopInterval = math.clamp(seconds,0.1,60) end
+			intervalBox.TextBox.Text = tostring(ClickFire.LoopInterval)
 		end)
 
 		listFrame = createSimple("ScrollingFrame",{
@@ -14366,6 +14483,10 @@ local function main()
 
 		window.OnActivate:Connect(function()
 			if #found == 0 then ClickFire.Scan() end
+		end)
+
+		window.OnDeactivate:Connect(function()
+			if ClickFire.Loop then ClickFire.SetLoop(false) end
 		end)
 	end
 
