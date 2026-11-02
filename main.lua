@@ -14441,6 +14441,496 @@ end
 
 return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end,
+["SubplaceBrowser"] = function()
+--[[
+	Subplace Browser Module
+
+	Lists every place in this experience's universe with search and sorting, and
+	teleports to whichever place you pick
+]]
+
+-- Common Locals
+local Main,Lib,Apps,Settings -- Main Containers
+local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
+local API,RMD,env,service,plr,create,createSimple -- Main Locals
+
+local function initDeps(data)
+	Main = data.Main
+	Lib = data.Lib
+	Apps = data.Apps
+	Settings = data.Settings
+
+	API = data.API
+	RMD = data.RMD
+	env = data.env
+	service = data.service
+	plr = data.plr
+	create = data.create
+	createSimple = data.createSimple
+end
+
+local function initAfterMain()
+	Explorer = Apps.Explorer
+end
+
+local function main()
+	local SubplaceBrowser = {}
+
+	local window, listFrame, statusLabel, searchBox, sortDrop, countLabel
+	local places = {}
+	local rows = {}
+	local updatedCache = {}
+	local fetching, loadingTimes, teleporting = false, false, false
+	local sortMode = "alpha"
+	local filterText = ""
+	local searchToken = 0
+
+	SubplaceBrowser.SortModes = {"Alphabetical","Recently Updated"}
+
+	local function setStatus(text)
+		if statusLabel then statusLabel.Gui.Text = text end
+	end
+
+	local function getService(name)
+		local ok,svc = pcall(function() return game:GetService(name) end)
+		if ok then return svc end
+		return nil
+	end
+
+	local function httpGet(url)
+		local target = oldgame or game
+
+		if target and target.HttpGet then
+			local ok,res = pcall(target.HttpGet,target,url)
+			if ok and type(res) == "string" then return res end
+		end
+
+		local req = request or http_request
+		if req then
+			local ok,res = pcall(req,{Url = url,Method = "GET"})
+			if ok and type(res) == "table" and res.Body then return res.Body end
+		end
+
+		return nil
+	end
+
+	local function decode(body)
+		local http = getService("HttpService")
+		if not http then return nil end
+
+		local ok,data = pcall(function() return http:JSONDecode(body) end)
+		if ok and type(data) == "table" then return data end
+		return nil
+	end
+
+	-- game.GameId is the universe id, the web call is only a fallback
+	local function getUniverseId()
+		local id = tonumber(game.GameId)
+		if id and id > 0 then return id end
+
+		local body = httpGet(("https://apis.roblox.com/universes/v1/places/%d/universe"):format(game.PlaceId))
+		if body then
+			local match = body:match('"universeId":(%d+)')
+			if match then return tonumber(match) end
+		end
+
+		return nil
+	end
+
+	local function fetchPlaces()
+		local universeId = getUniverseId()
+		if not universeId then return nil,"Could not find the universe for this place" end
+
+		local list = {}
+		local cursor = nil
+		local pages = 0
+
+		repeat
+			pages = pages + 1
+
+			local url = ("https://develop.roblox.com/v1/universes/%d/places?limit=100&sortOrder=Asc"):format(universeId)
+			if cursor then url = url.."&cursor="..cursor end
+
+			local body = httpGet(url)
+			if not body then return nil,"Could not reach the place list (no HttpGet in this executor)" end
+
+			local data = decode(body)
+			if not data or type(data.data) ~= "table" then return nil,"Could not read the place list" end
+
+			for i = 1,#data.data do
+				local place = data.data[i]
+				local id = (type(place) == "table") and tonumber(place.id) or nil
+				if id then
+					list[#list+1] = {
+						id = id,
+						name = tostring(place.name or "Unnamed")
+					}
+				end
+			end
+
+			cursor = data.nextPageCursor
+		until not cursor or pages >= 10 -- 1000 places is plenty
+
+		return list
+	end
+
+	local function parseTime(iso)
+		if type(iso) ~= "string" then return nil end
+
+		local year,month,day,hour,min,sec = iso:match("^(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)")
+		if not year then return nil end
+
+		local ok,value = pcall(os.time,{
+			year = tonumber(year),month = tonumber(month),day = tonumber(day),
+			hour = tonumber(hour),min = tonumber(min),sec = tonumber(sec)
+		})
+
+		if ok and tonumber(value) then return value end
+		return nil
+	end
+
+	local function fetchUpdated(place)
+		local body = httpGet(("https://economy.roblox.com/v2/assets/%d/details"):format(place.id))
+		if not body then return nil end
+		return parseTime(body:match('"Updated":"([^"]+)"'))
+	end
+
+	local function formatDate(timestamp)
+		if not timestamp then return nil end
+
+		local ok,text = pcall(os.date,"%Y-%m-%d",timestamp)
+		if ok and type(text) == "string" then return text end
+		return nil
+	end
+
+	local function visiblePlaces()
+		local needle = filterText:lower()
+		local list = {}
+
+		for i = 1,#places do
+			local place = places[i]
+			if needle == ""
+			or place.name:lower():find(needle,1,true)
+			or tostring(place.id):find(needle,1,true) then
+				list[#list+1] = place
+			end
+		end
+
+		if sortMode == "recent" then
+			table.sort(list,function(a,b)
+				local aTime = updatedCache[a.id] or 0
+				local bTime = updatedCache[b.id] or 0
+				if aTime == bTime then return a.name:lower() < b.name:lower() end
+				return aTime > bTime
+			end)
+		else
+			table.sort(list,function(a,b) return a.name:lower() < b.name:lower() end)
+		end
+
+		return list
+	end
+
+	local function joinPlace(place)
+		if teleporting then setStatus("Already teleporting...") return end
+
+		if place.id == game.PlaceId then
+			setStatus("You are already in this subplace")
+			return
+		end
+
+		local tps = getService("TeleportService")
+		if not tps then setStatus("TeleportService unavailable") return end
+
+		teleporting = true
+		setStatus(("Joining %s..."):format(place.name))
+
+		local ok,res = pcall(function() tps:Teleport(place.id,plr) end)
+		if not ok and tps.TeleportAsync then
+			ok,res = pcall(function() tps:TeleportAsync(place.id,{plr}) end)
+		end
+
+		teleporting = false
+
+		if not ok then setStatus("Join failed: "..tostring(res)) end
+	end
+
+	local function createRow(place)
+		local isCurrent = (place.id == game.PlaceId)
+
+		local row = createSimple("TextButton",{
+			AutoButtonColor = false,
+			BackgroundColor3 = Settings.Theme.Button,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Name = "Row",
+			Size = UDim2.new(1,-4,0,20),
+			Text = ""
+		})
+		row.Parent = listFrame
+
+		local name = Lib.Label.new()
+		name.Gui.Parent = row
+		name.Gui.Position = UDim2.new(0,6,0,0)
+		name.Gui.Size = UDim2.new(1,-146,1,0)
+		name.Gui.TextSize = 13
+		name.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		name.Gui.Text = place.name
+
+		local info = Lib.Label.new()
+		info.Gui.Parent = row
+		info.Gui.Position = UDim2.new(1,-138,0,0)
+		info.Gui.Size = UDim2.new(0,84,1,0)
+		info.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		info.Gui.TextColor3 = Color3.fromRGB(150,150,150)
+		info.Gui.TextSize = 12
+		info.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		-- in update order the date explains the order, otherwise show the place id
+		info.Gui.Text = (sortMode == "recent" and formatDate(updatedCache[place.id])) or tostring(place.id)
+
+		local action = Lib.Label.new()
+		action.Gui.Parent = row
+		action.Gui.Position = UDim2.new(1,-52,0,0)
+		action.Gui.Size = UDim2.new(0,48,1,0)
+		action.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		action.Gui.TextSize = 13
+		action.Gui.Text = isCurrent and "current" or "join"
+		action.Gui.TextColor3 = isCurrent and Color3.fromRGB(150,150,150) or Settings.Theme.ListSelection
+
+		row.MouseEnter:Connect(function()
+			if not isCurrent then row.BackgroundTransparency = 0.6 end
+		end)
+
+		row.MouseLeave:Connect(function()
+			row.BackgroundTransparency = 1
+		end)
+
+		row.MouseButton1Click:Connect(function()
+			joinPlace(place)
+		end)
+
+		return row
+	end
+
+	local function clearRows()
+		for i = 1,#rows do rows[i]:Destroy() end
+		rows = {}
+	end
+
+	local function rebuild()
+		clearRows()
+
+		local list = visiblePlaces()
+		for i = 1,#list do
+			rows[#rows+1] = createRow(list[i])
+		end
+
+		if countLabel then
+			if filterText == "" then
+				countLabel.Gui.Text = ("%d subplaces"):format(#list)
+			else
+				countLabel.Gui.Text = ("%d of %d"):format(#list,#places)
+			end
+		end
+
+		return #list
+	end
+
+	local function loadUpdateTimes()
+		if loadingTimes or #places == 0 then return end
+
+		local missing = 0
+		for i = 1,#places do
+			if not updatedCache[places[i].id] then missing = missing + 1 end
+		end
+
+		if missing == 0 then
+			rebuild()
+			setStatus("Sorted by most recently updated")
+			return
+		end
+
+		loadingTimes = true
+
+		task.spawn(function()
+			local done,failed = 0,0
+
+			for i = 1,#places do
+				local place = places[i]
+				if not updatedCache[place.id] then
+					local timestamp = fetchUpdated(place)
+					if timestamp then
+						updatedCache[place.id] = timestamp
+					else
+						failed = failed + 1
+					end
+
+					done = done + 1
+					if done % 10 == 0 then
+						setStatus(("Loading update times... %d/%d"):format(done,missing))
+					end
+
+					task.wait(0.05)
+				end
+			end
+
+			loadingTimes = false
+			rebuild()
+
+			if failed > 0 then
+				setStatus(("Sorted by update time, %d times could not be read"):format(failed))
+			else
+				setStatus("Sorted by most recently updated")
+			end
+		end)
+	end
+
+	SubplaceBrowser.SetSort = function(mode)
+		sortMode = (mode == "Recently Updated") and "recent" or "alpha"
+		local shown = rebuild()
+
+		if sortMode == "recent" then
+			setStatus(("Loading update times for %d subplaces..."):format(#places))
+			loadUpdateTimes()
+		else
+			setStatus(("%d of %d subplaces"):format(shown,#places))
+		end
+	end
+
+	SubplaceBrowser.Refresh = function()
+		if fetching then return end
+
+		fetching = true
+		setStatus("Fetching subplaces...")
+
+		task.spawn(function()
+			local list,err = fetchPlaces()
+			fetching = false
+
+			if not list then
+				setStatus(err or "Could not fetch subplaces")
+				return
+			end
+
+			places = list
+			rebuild()
+
+			if #places == 0 then
+				setStatus("This experience has no places listed")
+			else
+				setStatus(("%d subplaces, click one to join"):format(#places))
+			end
+
+			if sortMode == "recent" then loadUpdateTimes() end
+		end)
+	end
+
+	local function setFilter(text)
+		filterText = tostring(text or "")
+		local shown = rebuild()
+
+		if filterText == "" then
+			setStatus(("%d subplaces in this experience"):format(#places))
+		elseif shown == 0 then
+			setStatus(("No subplaces match \"%s\""):format(filterText))
+		else
+			setStatus(("%d of %d subplaces match \"%s\""):format(shown,#places,filterText))
+		end
+	end
+
+	SubplaceBrowser.Init = function()
+		window = Lib.Window.new()
+		window:SetTitle("Subplace Browser")
+		window:Resize(400,440)
+		SubplaceBrowser.Window = window
+
+		local content = window.GuiElems.Content
+
+		searchBox = Lib.ViewportTextBox.new()
+		searchBox.Gui.Parent = content
+		searchBox.Position = UDim2.new(0,0,0,0)
+		searchBox.Size = UDim2.new(1,-8,0,20)
+		searchBox.TextBox.TextSize = 13
+		searchBox.TextBox.PlaceholderText = "search subplaces by name or id"
+
+		local searchPadding = Instance.new("UIPadding")
+		searchPadding.Parent = searchBox.Gui
+		searchPadding.PaddingLeft = UDim.new(0,5)
+
+		sortDrop = Lib.DropDown.new()
+		sortDrop.CanBeEmpty = false
+		sortDrop.Gui.Parent = content
+		sortDrop.Gui.Position = UDim2.new(0,0,0,24)
+		sortDrop.Gui.Size = UDim2.new(0,150,0,20)
+		sortDrop:SetOptions(SubplaceBrowser.SortModes)
+		sortDrop.OnSelect:Connect(function(option) SubplaceBrowser.SetSort(option) end)
+
+		countLabel = Lib.Label.new()
+		countLabel.Gui.Parent = content
+		countLabel.Gui.Position = UDim2.new(0,156,0,24)
+		countLabel.Gui.Size = UDim2.new(1,-234,0,20)
+		countLabel.Gui.TextSize = 13
+		countLabel.Gui.TextColor3 = Color3.fromRGB(150,150,150)
+		countLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		countLabel.Gui.Text = "no subplaces yet"
+
+		local refreshButton = Lib.Button.new()
+		refreshButton.Gui.Parent = content
+		refreshButton.Gui.AnchorPoint = Vector2.new(1,0)
+		refreshButton.Gui.Position = UDim2.new(1,0,0,24)
+		refreshButton.Gui.Size = UDim2.new(0,74,0,20)
+		refreshButton.Gui.Text = "Refresh"
+		refreshButton.OnClick:Connect(function() SubplaceBrowser.Refresh() end)
+
+		listFrame = createSimple("ScrollingFrame",{
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			BottomImage = "",
+			CanvasSize = UDim2.new(0,0,0,0),
+			Name = "List",
+			Position = UDim2.new(0,0,0,50),
+			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
+			ScrollBarThickness = 12,
+			Size = UDim2.new(1,0,1,-76),
+			TopImage = ""
+		})
+		listFrame.Parent = content
+
+		local layout = Instance.new("UIListLayout")
+		layout.FillDirection = Enum.FillDirection.Vertical
+		layout.Padding = UDim.new(0,1)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = listFrame
+
+		statusLabel = Lib.Label.new()
+		statusLabel.Gui.Parent = content
+		statusLabel.Gui.AnchorPoint = Vector2.new(0,1)
+		statusLabel.Gui.Position = UDim2.new(0,0,1,0)
+		statusLabel.Gui.Size = UDim2.new(1,0,0,20)
+		statusLabel.Gui.Text = "Hit Refresh to list this experience's places"
+		statusLabel.Gui.TextSize = 13
+		statusLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+
+		searchBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
+			searchToken = searchToken + 1
+			local token = searchToken
+
+			task.delay(0.15,function()
+				if token ~= searchToken then return end
+				setFilter(searchBox:GetText())
+			end)
+		end)
+
+		window.OnActivate:Connect(function()
+			if #places == 0 and not fetching then SubplaceBrowser.Refresh() end
+		end)
+	end
+
+	return SubplaceBrowser
+end
+
+return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+end,
 ["ClickFire"] = function()
 --[[
 	Click Fire Module
@@ -15351,7 +15841,7 @@ end
 local isFsSupported = readfile and writefile and isfile and isfolder and listfiles and delfile and delfolder
 
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire, ServerHop--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
+local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire, ServerHop, SubplaceBrowser--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
 local API, RMD
 
 -- Default Settings
@@ -15480,7 +15970,7 @@ end
 Main = (function()
 	local Main = {}
 
-	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire","ServerHop"}
+	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire","ServerHop","SubplaceBrowser"}
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
@@ -15709,6 +16199,7 @@ Main = (function()
 		ModelViewer = Apps.ModelViewer
 		ClickFire = Apps.ClickFire
 		ServerHop = Apps.ServerHop
+		SubplaceBrowser = Apps.SubplaceBrowser
 		Notebook = Apps.Notebook
 		
 		--SecretServicePanel = Apps.SecretServicePanel
@@ -15721,6 +16212,7 @@ Main = (function()
 			ModelViewer = ModelViewer,
 			ClickFire = ClickFire,
 			ServerHop = ServerHop,
+			SubplaceBrowser = SubplaceBrowser,
 			Notebook = Notebook,
 			
 			--SecretServicePanel = SecretServicePanel,
@@ -16718,6 +17210,8 @@ Main = (function()
 
 		Main.CreateApp({Name = "Server Hop", IconMap = Explorer.ClassIcons, Icon = "TeleportService", Window = ServerHop.Window})
 
+		Main.CreateApp({Name = "Subplace Browser", IconMap = Explorer.ClassIcons, Icon = "HttpService", Window = SubplaceBrowser.Window})
+
 		--Main.CreateApp({Name = "Secret Service Panel", IconMap = Main.LargeIcons, Icon = "Output", Window = SecretServicePanel.Window})
 
 
@@ -16838,6 +17332,7 @@ Main = (function()
 		ModelViewer.Init()
 		ClickFire.Init()
 		ServerHop.Init()
+		SubplaceBrowser.Init()
 		
 		--SecretServicePanel.Init()
 		
