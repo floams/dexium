@@ -15025,8 +15025,9 @@ end,
 --[[
 	Remote Spy Module
 
-	Hooks the calling side of RemoteEvents and RemoteFunctions, logs every call
-	with its arguments, and lets you edit those arguments and fire them again
+	Keeps one row per remote and method, the way Cobalt does: the row carries a
+	call count, the latest calls are kept per remote, and you can step through
+	them, edit the arguments and fire them again, or block and ignore the remote
 ]]
 
 -- Common Locals
@@ -15056,33 +15057,40 @@ end
 local function main()
 	local RemoteSpy = {}
 
-	local unpack = table.unpack
-	local pack = table.pack
+	local unpack,pack = table.unpack,table.pack
 
-	local window, listFrame, statusLabel, filterBox, pauseButton, countLabel
-	local detailTitle, detailPath, argsBox
-	local blockButton, ignoreButton
+	local window, listFrame, statusLabel, filterBox, pauseButton, spamButton, countLabel
+	local detailTitle, detailPath, callLabel, argsBox
+	local prevButton, nextButton, blockButton, ignoreButton
 	local rows = {}
-	local selectedEntry
+	local selectedLog
+	local callIndex = 1
 	local paused = false
 	local filterText = ""
 	local lastSeq = -1
 
-	local MAX_ENTRIES = 200 -- older calls fall off the end of the log
+	local MAX_LOGS = 120 -- remotes remembered at once
 	local MAX_SHOWN = 120 -- rows drawn at once
+	local MAX_CALLS = 40 -- calls kept per remote
 	local MAX_ARG_TEXT = 4000 -- characters of arguments kept per call
+	local SPAM_CALLS = 15 -- calls within the window that trip the spam filter
+	local SPAM_WINDOW = 1 -- seconds
 	local REFRESH_INTERVAL = 0.3
 
-	-- kept in getgenv so running the script again reuses the same log and hook
+	-- shared through getgenv so running the script again reuses the log and hook
 	local shared = (getgenv and getgenv()) or _G
 	local state = shared.__DexiumRemoteSpy
 
-	if type(state) ~= "table" then
+	if type(state) ~= "table" or state.version ~= 2 then
 		state = {
-			entries = {},
-			seq = 0,
+			version = 2,
+			logs = {},
+			byRemote = setmetatable({},{__mode = "k"}),
 			blocked = setmetatable({},{__mode = "k"}),
-			ignored = setmetatable({},{__mode = "k"}),
+			seq = 0,
+			spamCount = 0,
+			spamName = nil,
+			autoIgnore = false,
 			hooked = false
 		}
 		shared.__DexiumRemoteSpy = state
@@ -15092,13 +15100,13 @@ local function main()
 		if statusLabel then statusLabel.Gui.Text = text end
 	end
 
-	local function updateCount()
+	local function updateCount(shown)
 		if not countLabel then return end
 
 		if filterText == "" then
-			countLabel.Gui.Text = ("%d logged"):format(#state.entries)
+			countLabel.Gui.Text = ("%d remotes"):format(#state.logs)
 		else
-			countLabel.Gui.Text = ("%d of %d"):format(#rows,#state.entries)
+			countLabel.Gui.Text = ("%d of %d"):format(shown or #rows,#state.logs)
 		end
 	end
 
@@ -15197,7 +15205,7 @@ local function main()
 			return "{" .. table.concat(parts,", ") .. "}"
 		end
 
-		-- long comments keep this valid source while still showing what it was
+		-- the long comment keeps this valid source while still naming the type
 		return ("nil--[=[%s]=]"):format(tostring(value))
 	end
 
@@ -15222,30 +15230,73 @@ local function main()
 	end
 
 	local function capture(remote,method,caller,...)
-		if paused or state.ignored[remote] then return end
+		if paused then return end
 
 		local class = remote.ClassName
 		if class ~= "RemoteEvent" and class ~= "RemoteFunction" and class ~= "UnreliableRemoteEvent" then
 			return
 		end
 
+		local perRemote = state.byRemote[remote]
+		if not perRemote then
+			perRemote = {}
+			state.byRemote[remote] = perRemote
+		end
+
+		local log = perRemote[method]
+		if not log then
+			log = {
+				remote = remote,
+				name = remote.Name,
+				className = class,
+				method = method,
+				calls = {},
+				spam = {},
+				count = 0,
+				ignored = false,
+				blocked = false
+			}
+			perRemote[method] = log
+			table.insert(state.logs,1,log)
+
+			while #state.logs > MAX_LOGS do
+				table.remove(state.logs)
+			end
+		end
+
+		if log.ignored then return end
+
 		local args = pack(...)
 
-		local entry = {
-			remote = remote,
-			name = remote.Name,
-			className = class,
-			method = method,
-			caller = caller,
-			time = os.date("%H:%M:%S"),
-			text = serializeArgs(args,args.n)
-		}
-
-		table.insert(state.entries,1,entry)
 		state.seq = state.seq + 1
+		log.count = log.count + 1
 
-		while #state.entries > MAX_ENTRIES do
-			table.remove(state.entries)
+		table.insert(log.calls,1,{
+			seq = state.seq,
+			text = serializeArgs(args,args.n),
+			caller = caller,
+			time = os.date("%H:%M:%S")
+		})
+
+		while #log.calls > MAX_CALLS do
+			table.remove(log.calls)
+		end
+
+		if state.autoIgnore then
+			local now = os.clock()
+			local spam = log.spam
+
+			spam[#spam+1] = now
+			while #spam > 0 and now - spam[1] > SPAM_WINDOW do
+				table.remove(spam,1)
+			end
+
+			if #spam > SPAM_CALLS then
+				log.ignored = true
+				log.ignoredBySpam = true
+				state.spamCount = state.spamCount + 1
+				state.spamName = log.name
+			end
 		end
 	end
 
@@ -15284,13 +15335,13 @@ local function main()
 		return true
 	end
 
-	local function entryPath(entry)
-		if not entry.path then
-			local ok,path = pcall(instancePath,entry.remote)
-			entry.path = (ok and path) or "nil"
+	local function logPath(log)
+		if not log.path then
+			local ok,path = pcall(instancePath,log.remote)
+			log.path = (ok and path) or "nil"
 		end
 
-		return entry.path
+		return log.path
 	end
 
 	local function clearRows()
@@ -15298,33 +15349,60 @@ local function main()
 		rows = {}
 	end
 
-	local function preview(entry)
-		local text = entry.text
-		if #text > 110 then text = text:sub(1,110) .. "..." end
-		return text
-	end
-
 	local function syncDetail()
 		if not blockButton then return end
 
-		if selectedEntry and state.blocked[selectedEntry.remote] then
-			blockButton.Gui.Text = "Unblock"
-		else
-			blockButton.Gui.Text = "Block"
-		end
+		local blocked = selectedLog and selectedLog.remote and state.blocked[selectedLog.remote]
 
-		if selectedEntry and state.ignored[selectedEntry.remote] then
-			ignoreButton.Gui.Text = "Unignore"
-		else
-			ignoreButton.Gui.Text = "Ignore"
-		end
+		blockButton.Gui.Text = blocked and "Unblock" or "Block"
+		ignoreButton.Gui.Text = (selectedLog and selectedLog.ignored) and "Unignore" or "Ignore"
 	end
 
-	local function createRow(entry)
+	local function showCall()
+		if not detailTitle then return end
+
+		if not selectedLog then
+			detailTitle.Gui.Text = "No remote selected"
+			detailPath.Gui.Text = ""
+			callLabel.Gui.Text = "no calls"
+			argsBox.Text = ""
+			prevButton:SetDisabled(true)
+			nextButton:SetDisabled(true)
+			return
+		end
+
+		local calls = selectedLog.calls
+
+		if #calls == 0 then
+			callIndex = 1
+		elseif callIndex > #calls then
+			callIndex = #calls
+		elseif callIndex < 1 then
+			callIndex = 1
+		end
+
+		detailTitle.Gui.Text = ("%s  %s"):format(selectedLog.className,selectedLog.name)
+
+		local call = calls[callIndex]
+		local path = logPath(selectedLog)
+		if call and call.caller then path = path .. "   from " .. call.caller end
+		detailPath.Gui.Text = path
+
+		callLabel.Gui.Text = (#calls == 0) and "no calls" or ("%s  %d of %d"):format(selectedLog.method,callIndex,#calls)
+
+		argsBox.Text = call and call.text or ""
+
+		prevButton:SetDisabled(#calls == 0 or callIndex >= #calls)
+		nextButton:SetDisabled(#calls == 0 or callIndex <= 1)
+	end
+
+	local function createRow(log)
+		local selected = (log == selectedLog)
+
 		local row = createSimple("TextButton",{
 			AutoButtonColor = false,
 			BackgroundColor3 = Settings.Theme.Button,
-			BackgroundTransparency = (entry == selectedEntry) and 0.7 or 1,
+			BackgroundTransparency = selected and 0.7 or 1,
 			BorderSizePixel = 0,
 			Name = "Row",
 			Size = UDim2.new(1,-4,0,20),
@@ -15332,32 +15410,39 @@ local function main()
 		})
 		row.Parent = listFrame
 
-		local time = Lib.Label.new()
-		time.Gui.Parent = row
-		time.Gui.Position = UDim2.new(0,4,0,0)
-		time.Gui.Size = UDim2.new(0,44,1,0)
-		time.Gui.TextSize = 12
-		time.Gui.TextColor3 = Color3.fromRGB(140,140,140)
-		time.Gui.Text = entry.time
+		local name = Lib.Label.new()
+		name.Gui.Parent = row
+		name.Gui.Position = UDim2.new(0,4,0,0)
+		name.Gui.Size = UDim2.new(1,-96,1,0)
+		name.Gui.TextSize = 13
+		name.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		name.Gui.Text = ("%s  (%s)"):format(log.name,log.method)
 
-		local body = Lib.Label.new()
-		body.Gui.Parent = row
-		body.Gui.Position = UDim2.new(0,50,0,0)
-		body.Gui.Size = UDim2.new(1,-54,1,0)
-		body.Gui.TextSize = 13
-		body.Gui.TextTruncate = Enum.TextTruncate.AtEnd
-		body.Gui.Text = entry.name .. "(" .. preview(entry) .. ")"
+		if log.blocked then
+			name.Gui.TextColor3 = Color3.fromRGB(220,120,120)
+		elseif log.ignored then
+			name.Gui.TextColor3 = Color3.fromRGB(130,130,130)
+		end
+
+		local count = Lib.Label.new()
+		count.Gui.Parent = row
+		count.Gui.Position = UDim2.new(1,-90,0,0)
+		count.Gui.Size = UDim2.new(0,86,1,0)
+		count.Gui.TextSize = 12
+		count.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		count.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		count.Gui.Text = log.blocked and ("%d  blocked"):format(log.count) or ("%d calls"):format(log.count)
 
 		row.MouseEnter:Connect(function()
-			if entry ~= selectedEntry then row.BackgroundTransparency = 0.6 end
+			if log ~= selectedLog then row.BackgroundTransparency = 0.6 end
 		end)
 
 		row.MouseLeave:Connect(function()
-			if entry ~= selectedEntry then row.BackgroundTransparency = 1 end
+			if log ~= selectedLog then row.BackgroundTransparency = 1 end
 		end)
 
 		row.MouseButton1Click:Connect(function()
-			RemoteSpy.Select(entry)
+			RemoteSpy.Select(log)
 		end)
 
 		return row
@@ -15369,46 +15454,28 @@ local function main()
 		local needle = filterText:lower()
 		local shown = 0
 
-		for i = 1,#state.entries do
-			local entry = state.entries[i]
+		for i = 1,#state.logs do
+			local log = state.logs[i]
 			local hit = needle == ""
-				or entry.name:lower():find(needle,1,true)
-				or entry.text:lower():find(needle,1,true)
+				or log.name:lower():find(needle,1,true)
+				or log.method:lower():find(needle,1,true)
+				or log.className:lower():find(needle,1,true)
 
 			if hit then
 				shown = shown + 1
 				if shown > MAX_SHOWN then break end
-				rows[#rows+1] = createRow(entry)
+				rows[#rows+1] = createRow(log)
 			end
 		end
 
-		updateCount()
+		updateCount(shown)
 	end
 
-	RemoteSpy.Select = function(entry)
-		selectedEntry = entry
-
-		if not entry then
-			if detailTitle then
-				detailTitle.Gui.Text = "No call selected"
-				detailPath.Gui.Text = ""
-				argsBox.Text = ""
-			end
-
-			syncDetail()
-			rebuild()
-			return
-		end
-
-		detailTitle.Gui.Text = ("%s  %s"):format(entry.className,entry.name)
-
-		local path = entryPath(entry)
-		if entry.caller then path = path .. "   from " .. entry.caller end
-		detailPath.Gui.Text = path
-
-		argsBox.Text = entry.text
-
+	RemoteSpy.Select = function(log)
+		selectedLog = log
+		callIndex = 1
 		syncDetail()
+		showCall()
 		rebuild()
 	end
 
@@ -15434,7 +15501,7 @@ local function main()
 		local values = {}
 		for i = 2,packed.n do values[#values+1] = packed[i] end
 
-		-- a single table is treated as the argument list, like SimpleSpy does
+		-- a single table is treated as the argument list, like Cobalt's editor
 		if #values == 1 and type(values[1]) == "table" then
 			values = values[1]
 		end
@@ -15443,10 +15510,10 @@ local function main()
 	end
 
 	local function fireSelected()
-		if not selectedEntry then setStatus("Pick a logged call first") return end
+		if not selectedLog then setStatus("Pick a remote first") return end
 
-		local remote = selectedEntry.remote
-		local method = selectedEntry.method
+		local remote = selectedLog.remote
+		local method = selectedLog.method
 
 		local args,err = selectionArgs()
 		if not args then setStatus(err) return end
@@ -15454,55 +15521,95 @@ local function main()
 		if method == "InvokeServer" then
 			local packed = pack(pcall(remote.InvokeServer,remote,unpack(args)))
 			if packed[1] then
-				setStatus(("Invoked %s, got %s"):format(selectedEntry.name,tostring(packed[2])))
+				setStatus(("Invoked %s, got %s"):format(selectedLog.name,tostring(packed[2])))
 			else
 				setStatus(("Invoke failed: %s"):format(tostring(packed[2])))
 			end
 		else
 			local ok,res = pcall(remote.FireServer,remote,unpack(args))
 			if ok then
-				setStatus(("Fired %s"):format(selectedEntry.name))
+				setStatus(("Fired %s(%s)"):format(selectedLog.name,argsBox.Text))
 			else
 				setStatus(("Fire failed: %s"):format(tostring(res)))
 			end
 		end
 	end
 
-	local function toggleBlock()
-		if not selectedEntry then setStatus("Pick a logged call first") return end
+	local function signalName(log)
+		if log.className == "RemoteFunction" then return "OnClientInvoke" end
+		return "OnClientEvent"
+	end
 
-		local remote = selectedEntry.remote
+	-- turns the game's own handlers on or off, which is how a spy blocks an event
+	local function setIncoming(log,enabled)
+		if not getconnections then return end
+
+		local ok,signal = pcall(function() return log.remote[signalName(log)] end)
+		if not ok or not signal then return end
+
+		pcall(function()
+			for _,connection in pairs(getconnections(signal)) do
+				if enabled then
+					if connection.Enable then connection:Enable() end
+				else
+					if connection.Disable then connection:Disable() end
+				end
+			end
+		end)
+	end
+
+	local function toggleBlock()
+		if not selectedLog then setStatus("Pick a remote first") return end
+
+		local remote = selectedLog.remote
+		local perRemote = state.byRemote[remote]
+		local logs = perRemote or {[selectedLog.method] = selectedLog}
+
 		if state.blocked[remote] then
 			state.blocked[remote] = nil
-			setStatus(("Unblocked %s"):format(selectedEntry.name))
+
+			for _,log in pairs(logs) do
+				log.blocked = false
+				setIncoming(log,true)
+			end
+
+			setStatus(("Unblocked %s"):format(selectedLog.name))
 		else
 			state.blocked[remote] = true
-			setStatus(("Blocked %s, its calls never reach the server"):format(selectedEntry.name))
+
+			for _,log in pairs(logs) do
+				log.blocked = true
+				setIncoming(log,false)
+			end
+
+			setStatus(("Blocked %s, outgoing calls stop and handlers are disabled"):format(selectedLog.name))
 		end
 
 		syncDetail()
+		rebuild()
 	end
 
 	local function toggleIgnore()
-		if not selectedEntry then setStatus("Pick a logged call first") return end
+		if not selectedLog then setStatus("Pick a remote first") return end
 
-		local remote = selectedEntry.remote
-		if state.ignored[remote] then
-			state.ignored[remote] = nil
-			setStatus(("Logging %s again"):format(selectedEntry.name))
+		selectedLog.ignored = not selectedLog.ignored
+		selectedLog.ignoredBySpam = nil
+
+		if selectedLog.ignored then
+			setStatus(("Ignoring %s from now on"):format(selectedLog.name))
 		else
-			state.ignored[remote] = true
-			setStatus(("Hiding future calls to %s"):format(selectedEntry.name))
+			setStatus(("Logging %s again"):format(selectedLog.name))
 		end
 
 		syncDetail()
+		rebuild()
 	end
 
 	local function copySelected()
-		if not selectedEntry then setStatus("Pick a logged call first") return end
+		if not selectedLog then setStatus("Pick a remote first") return end
 		if not setclipboard then setStatus("this executor has no clipboard support") return end
 
-		local source = ("%s:%s(%s)"):format(entryPath(selectedEntry),selectedEntry.method,argsBox.Text)
+		local source = ("%s:%s(%s)"):format(logPath(selectedLog),selectedLog.method,argsBox.Text)
 		local ok = pcall(setclipboard,source)
 
 		if ok then
@@ -15513,7 +15620,8 @@ local function main()
 	end
 
 	local function clearLog()
-		state.entries = {}
+		state.logs = {}
+		state.byRemote = setmetatable({},{__mode = "k"})
 		RemoteSpy.Select(nil)
 		setStatus("Log cleared")
 	end
@@ -15544,12 +15652,23 @@ local function main()
 			setStatus(paused and "Logging paused, calls still go through" or "Logging again")
 		end)
 
+		spamButton = Lib.Button.new()
+		spamButton.Gui.Parent = content
+		spamButton.Gui.Position = UDim2.new(0,110,0,2)
+		spamButton.Gui.Size = UDim2.new(0,66,0,20)
+		spamButton.Gui.Text = "Spam: off"
+		spamButton.OnClick:Connect(function()
+			state.autoIgnore = not state.autoIgnore
+			spamButton.Gui.Text = state.autoIgnore and "Spam: on" or "Spam: off"
+			setStatus(state.autoIgnore and ("Ignoring remotes that fire more than %d times a second"):format(SPAM_CALLS) or "Spam filter off")
+		end)
+
 		filterBox = Lib.ViewportTextBox.new()
 		filterBox.Gui.Parent = content
-		filterBox.Position = UDim2.new(0,110,0,2)
-		filterBox.Size = UDim2.new(1,-192,0,20)
+		filterBox.Position = UDim2.new(0,180,0,2)
+		filterBox.Size = UDim2.new(1,-262,0,20)
 		filterBox.TextBox.TextSize = 13
-		filterBox.TextBox.PlaceholderText = "filter by remote or argument"
+		filterBox.TextBox.PlaceholderText = "filter remotes"
 
 		local filterPadding = Instance.new("UIPadding")
 		filterPadding.Parent = filterBox.Gui
@@ -15564,11 +15683,11 @@ local function main()
 		countLabel.Gui.Parent = content
 		countLabel.Gui.AnchorPoint = Vector2.new(1,0)
 		countLabel.Gui.Position = UDim2.new(1,0,0,2)
-		countLabel.Gui.Size = UDim2.new(0,72,0,20)
+		countLabel.Gui.Size = UDim2.new(0,76,0,20)
 		countLabel.Gui.TextSize = 12
 		countLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
 		countLabel.Gui.TextColor3 = Color3.fromRGB(140,140,140)
-		countLabel.Gui.Text = "0 logged"
+		countLabel.Gui.Text = "0 remotes"
 
 		listFrame = createSimple("ScrollingFrame",{
 			AutomaticCanvasSize = Enum.AutomaticSize.Y,
@@ -15597,7 +15716,7 @@ local function main()
 		detailTitle.Gui.Size = UDim2.new(0.5,-6,0,18)
 		detailTitle.Gui.TextSize = 13
 		detailTitle.Gui.TextTruncate = Enum.TextTruncate.AtEnd
-		detailTitle.Gui.Text = "No call selected"
+		detailTitle.Gui.Text = "No remote selected"
 
 		detailPath = Lib.Label.new()
 		detailPath.Gui.Parent = content
@@ -15608,12 +15727,41 @@ local function main()
 		detailPath.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 		detailPath.Gui.Text = ""
 
+		prevButton = Lib.Button.new()
+		prevButton.Gui.Parent = content
+		prevButton.Gui.Position = UDim2.new(0.5,6,0,62)
+		prevButton.Gui.Size = UDim2.new(0,62,0,20)
+		prevButton.Gui.Text = "< Older"
+		prevButton.OnClick:Connect(function()
+			callIndex = callIndex + 1
+			showCall()
+		end)
+
+		callLabel = Lib.Label.new()
+		callLabel.Gui.Parent = content
+		callLabel.Gui.Position = UDim2.new(0.5,72,0,62)
+		callLabel.Gui.Size = UDim2.new(0,110,0,20)
+		callLabel.Gui.TextSize = 12
+		callLabel.Gui.TextXAlignment = Enum.TextXAlignment.Center
+		callLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		callLabel.Gui.Text = "no calls"
+
+		nextButton = Lib.Button.new()
+		nextButton.Gui.Parent = content
+		nextButton.Gui.Position = UDim2.new(0.5,186,0,62)
+		nextButton.Gui.Size = UDim2.new(0,62,0,20)
+		nextButton.Gui.Text = "Newer >"
+		nextButton.OnClick:Connect(function()
+			callIndex = callIndex - 1
+			showCall()
+		end)
+
 		local editorFrame = createSimple("Frame",{
 			BackgroundColor3 = Settings.Theme.TextBox,
 			BorderColor3 = Settings.Theme.Outline3,
 			Name = "Arguments",
-			Position = UDim2.new(0.5,6,0,62),
-			Size = UDim2.new(0.5,-6,1,-108)
+			Position = UDim2.new(0.5,6,0,86),
+			Size = UDim2.new(0.5,-6,1,-132)
 		})
 		editorFrame.Parent = content
 
@@ -15677,8 +15825,15 @@ local function main()
 		RemoteSpy.Select(nil)
 
 		task.spawn(function()
+			local seenSpam = state.spamCount
+
 			while true do
 				task.wait(REFRESH_INTERVAL)
+
+				if state.spamCount ~= seenSpam then
+					seenSpam = state.spamCount
+					setStatus(("Auto ignored %s after a burst of calls"):format(tostring(state.spamName)))
+				end
 
 				if window and state.seq ~= lastSeq then
 					lastSeq = state.seq
@@ -15693,7 +15848,6 @@ end
 
 return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end,
-
 ["ClickFire"] = function()
 --[[
 	Click Fire Module
