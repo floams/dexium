@@ -15021,6 +15021,679 @@ end
 
 return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end,
+["RemoteSpy"] = function()
+--[[
+	Remote Spy Module
+
+	Hooks the calling side of RemoteEvents and RemoteFunctions, logs every call
+	with its arguments, and lets you edit those arguments and fire them again
+]]
+
+-- Common Locals
+local Main,Lib,Apps,Settings -- Main Containers
+local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
+local API,RMD,env,service,plr,create,createSimple -- Main Locals
+
+local function initDeps(data)
+	Main = data.Main
+	Lib = data.Lib
+	Apps = data.Apps
+	Settings = data.Settings
+
+	API = data.API
+	RMD = data.RMD
+	env = data.env
+	service = data.service
+	plr = data.plr
+	create = data.create
+	createSimple = data.createSimple
+end
+
+local function initAfterMain()
+	Explorer = Apps.Explorer
+end
+
+local function main()
+	local RemoteSpy = {}
+
+	local unpack = table.unpack
+	local pack = table.pack
+
+	local window, listFrame, statusLabel, filterBox, pauseButton, countLabel
+	local detailTitle, detailPath, argsBox
+	local blockButton, ignoreButton
+	local rows = {}
+	local selectedEntry
+	local paused = false
+	local filterText = ""
+	local lastSeq = -1
+
+	local MAX_ENTRIES = 200 -- older calls fall off the end of the log
+	local MAX_SHOWN = 120 -- rows drawn at once
+	local MAX_ARG_TEXT = 4000 -- characters of arguments kept per call
+	local REFRESH_INTERVAL = 0.3
+
+	-- kept in getgenv so running the script again reuses the same log and hook
+	local shared = (getgenv and getgenv()) or _G
+	local state = shared.__DexiumRemoteSpy
+
+	if type(state) ~= "table" then
+		state = {
+			entries = {},
+			seq = 0,
+			blocked = setmetatable({},{__mode = "k"}),
+			ignored = setmetatable({},{__mode = "k"}),
+			hooked = false
+		}
+		shared.__DexiumRemoteSpy = state
+	end
+
+	local function setStatus(text)
+		if statusLabel then statusLabel.Gui.Text = text end
+	end
+
+	local function updateCount()
+		if not countLabel then return end
+
+		if filterText == "" then
+			countLabel.Gui.Text = ("%d logged"):format(#state.entries)
+		else
+			countLabel.Gui.Text = ("%d of %d"):format(#rows,#state.entries)
+		end
+	end
+
+	local function quoted(value)
+		return string.format("%q",value)
+	end
+
+	-- turns an instance into source that resolves to the same object
+	local function instancePath(obj)
+		if obj == game then return "game" end
+
+		local ok,full = pcall(function() return obj:GetFullName() end)
+		if not ok or type(full) ~= "string" or full == "" then return "nil" end
+
+		local top,rest = full:match("^([^%.]+)%.(.+)$")
+		if not top then
+			return ("game:GetService(%s)"):format(quoted(full))
+		end
+
+		local path = ("game:GetService(%s)"):format(quoted(top))
+		for segment in string.gmatch(rest,"[^%.]+") do
+			path = path .. ("[%s]"):format(quoted(segment))
+		end
+
+		return path
+	end
+
+	local function serialize(value,depth,seen)
+		local kind = typeof(value)
+
+		if kind == "string" then
+			return quoted(value)
+		elseif kind == "number" then
+			if value ~= value then return "(0/0)" end
+			if value == math.huge then return "math.huge" end
+			if value == -math.huge then return "-math.huge" end
+			return tostring(value)
+		elseif kind == "boolean" then
+			return tostring(value)
+		elseif kind == "Instance" then
+			return instancePath(value)
+		elseif kind == "EnumItem" then
+			return tostring(value)
+		elseif kind == "Vector3" then
+			return ("Vector3.new(%g, %g, %g)"):format(value.X,value.Y,value.Z)
+		elseif kind == "Vector2" then
+			return ("Vector2.new(%g, %g)"):format(value.X,value.Y)
+		elseif kind == "CFrame" then
+			local x,y,z = value:GetComponents()
+			return ("CFrame.new(%g, %g, %g)"):format(x,y,z)
+		elseif kind == "Color3" then
+			return ("Color3.fromRGB(%d, %d, %d)"):format(
+				math.floor(value.R * 255 + 0.5),
+				math.floor(value.G * 255 + 0.5),
+				math.floor(value.B * 255 + 0.5)
+			)
+		elseif kind == "UDim2" then
+			return ("UDim2.new(%g, %g, %g, %g)"):format(value.X.Scale,value.X.Offset,value.Y.Scale,value.Y.Offset)
+		elseif kind == "UDim" then
+			return ("UDim.new(%g, %g)"):format(value.Scale,value.Offset)
+		elseif kind == "BrickColor" then
+			return ("BrickColor.new(%s)"):format(quoted(value.Name))
+		elseif kind == "table" then
+			if depth <= 0 or seen[value] then return "{...}" end
+
+			seen[value] = true
+
+			local parts = {}
+			local count = 0
+
+			for key,item in pairs(value) do
+				count = count + 1
+				if count > 40 then
+					parts[#parts+1] = "..."
+					break
+				end
+
+				local keyText
+				if type(key) == "number" and key == math.floor(key) then
+					keyText = nil
+				elseif type(key) == "string" and key:match("^[%a_][%w_]*$") then
+					keyText = key
+				else
+					keyText = "[" .. serialize(key,depth - 1,seen) .. "]"
+				end
+
+				local valueText = serialize(item,depth - 1,seen)
+				if keyText then
+					parts[#parts+1] = keyText .. " = " .. valueText
+				else
+					parts[#parts+1] = valueText
+				end
+			end
+
+			seen[value] = nil
+			return "{" .. table.concat(parts,", ") .. "}"
+		end
+
+		-- long comments keep this valid source while still showing what it was
+		return ("nil--[=[%s]=]"):format(tostring(value))
+	end
+
+	local function serializeArgs(args,count)
+		local parts = {}
+		local length = 0
+
+		for i = 1,count do
+			local text = serialize(args[i],2,{})
+			if #text > 600 then text = text:sub(1,600) .. "..." end
+
+			length = length + #text + 2
+			if length > MAX_ARG_TEXT then
+				parts[#parts+1] = "..."
+				break
+			end
+
+			parts[#parts+1] = text
+		end
+
+		return table.concat(parts,", ")
+	end
+
+	local function capture(remote,method,caller,...)
+		if paused or state.ignored[remote] then return end
+
+		local class = remote.ClassName
+		if class ~= "RemoteEvent" and class ~= "RemoteFunction" and class ~= "UnreliableRemoteEvent" then
+			return
+		end
+
+		local args = pack(...)
+
+		local entry = {
+			remote = remote,
+			name = remote.Name,
+			className = class,
+			method = method,
+			caller = caller,
+			time = os.date("%H:%M:%S"),
+			text = serializeArgs(args,args.n)
+		}
+
+		table.insert(state.entries,1,entry)
+		state.seq = state.seq + 1
+
+		while #state.entries > MAX_ENTRIES do
+			table.remove(state.entries)
+		end
+	end
+
+	local function installHook()
+		if state.hooked then return true end
+		if not hookmetamethod or not getnamecallmethod then
+			return false,"this executor cannot hook namecalls"
+		end
+
+		local ok,result = pcall(function()
+			local original
+			original = hookmetamethod(game,"__namecall",function(self,...)
+				local method = getnamecallmethod()
+
+				if method == "FireServer" or method == "InvokeServer" then
+					if state.blocked[self] then
+						return
+					end
+
+					local caller
+					if debug and debug.info then caller = debug.info(2,"s") end
+
+					pcall(capture,self,method,caller,...)
+				end
+
+				return original(self,...)
+			end)
+			return original
+		end)
+
+		if not ok or not result then
+			return false,tostring(result)
+		end
+
+		state.hooked = true
+		return true
+	end
+
+	local function entryPath(entry)
+		if not entry.path then
+			local ok,path = pcall(instancePath,entry.remote)
+			entry.path = (ok and path) or "nil"
+		end
+
+		return entry.path
+	end
+
+	local function clearRows()
+		for i = 1,#rows do rows[i]:Destroy() end
+		rows = {}
+	end
+
+	local function preview(entry)
+		local text = entry.text
+		if #text > 110 then text = text:sub(1,110) .. "..." end
+		return text
+	end
+
+	local function syncDetail()
+		if not blockButton then return end
+
+		if selectedEntry and state.blocked[selectedEntry.remote] then
+			blockButton.Gui.Text = "Unblock"
+		else
+			blockButton.Gui.Text = "Block"
+		end
+
+		if selectedEntry and state.ignored[selectedEntry.remote] then
+			ignoreButton.Gui.Text = "Unignore"
+		else
+			ignoreButton.Gui.Text = "Ignore"
+		end
+	end
+
+	local function createRow(entry)
+		local row = createSimple("TextButton",{
+			AutoButtonColor = false,
+			BackgroundColor3 = Settings.Theme.Button,
+			BackgroundTransparency = (entry == selectedEntry) and 0.7 or 1,
+			BorderSizePixel = 0,
+			Name = "Row",
+			Size = UDim2.new(1,-4,0,20),
+			Text = ""
+		})
+		row.Parent = listFrame
+
+		local time = Lib.Label.new()
+		time.Gui.Parent = row
+		time.Gui.Position = UDim2.new(0,4,0,0)
+		time.Gui.Size = UDim2.new(0,44,1,0)
+		time.Gui.TextSize = 12
+		time.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		time.Gui.Text = entry.time
+
+		local body = Lib.Label.new()
+		body.Gui.Parent = row
+		body.Gui.Position = UDim2.new(0,50,0,0)
+		body.Gui.Size = UDim2.new(1,-54,1,0)
+		body.Gui.TextSize = 13
+		body.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		body.Gui.Text = entry.name .. "(" .. preview(entry) .. ")"
+
+		row.MouseEnter:Connect(function()
+			if entry ~= selectedEntry then row.BackgroundTransparency = 0.6 end
+		end)
+
+		row.MouseLeave:Connect(function()
+			if entry ~= selectedEntry then row.BackgroundTransparency = 1 end
+		end)
+
+		row.MouseButton1Click:Connect(function()
+			RemoteSpy.Select(entry)
+		end)
+
+		return row
+	end
+
+	local function rebuild()
+		clearRows()
+
+		local needle = filterText:lower()
+		local shown = 0
+
+		for i = 1,#state.entries do
+			local entry = state.entries[i]
+			local hit = needle == ""
+				or entry.name:lower():find(needle,1,true)
+				or entry.text:lower():find(needle,1,true)
+
+			if hit then
+				shown = shown + 1
+				if shown > MAX_SHOWN then break end
+				rows[#rows+1] = createRow(entry)
+			end
+		end
+
+		updateCount()
+	end
+
+	RemoteSpy.Select = function(entry)
+		selectedEntry = entry
+
+		if not entry then
+			if detailTitle then
+				detailTitle.Gui.Text = "No call selected"
+				detailPath.Gui.Text = ""
+				argsBox.Text = ""
+			end
+
+			syncDetail()
+			rebuild()
+			return
+		end
+
+		detailTitle.Gui.Text = ("%s  %s"):format(entry.className,entry.name)
+
+		local path = entryPath(entry)
+		if entry.caller then path = path .. "   from " .. entry.caller end
+		detailPath.Gui.Text = path
+
+		argsBox.Text = entry.text
+
+		syncDetail()
+		rebuild()
+	end
+
+	-- reads the editor back into a list of arguments
+	local function selectionArgs()
+		local loader = loadstring
+		if not loader and env then
+			local ok,value = pcall(function() return env.loadstring end)
+			if ok then loader = value end
+		end
+
+		if not loader then return nil,"this executor has no loadstring" end
+
+		local text = argsBox.Text
+		if text:match("^%s*$") then return {} end
+
+		local chunk,err = loader("return " .. text)
+		if not chunk then return nil,"bad arguments: " .. tostring(err) end
+
+		local packed = pack(pcall(chunk))
+		if not packed[1] then return nil,"bad arguments: " .. tostring(packed[2]) end
+
+		local values = {}
+		for i = 2,packed.n do values[#values+1] = packed[i] end
+
+		-- a single table is treated as the argument list, like SimpleSpy does
+		if #values == 1 and type(values[1]) == "table" then
+			values = values[1]
+		end
+
+		return values
+	end
+
+	local function fireSelected()
+		if not selectedEntry then setStatus("Pick a logged call first") return end
+
+		local remote = selectedEntry.remote
+		local method = selectedEntry.method
+
+		local args,err = selectionArgs()
+		if not args then setStatus(err) return end
+
+		if method == "InvokeServer" then
+			local packed = pack(pcall(remote.InvokeServer,remote,unpack(args)))
+			if packed[1] then
+				setStatus(("Invoked %s, got %s"):format(selectedEntry.name,tostring(packed[2])))
+			else
+				setStatus(("Invoke failed: %s"):format(tostring(packed[2])))
+			end
+		else
+			local ok,res = pcall(remote.FireServer,remote,unpack(args))
+			if ok then
+				setStatus(("Fired %s"):format(selectedEntry.name))
+			else
+				setStatus(("Fire failed: %s"):format(tostring(res)))
+			end
+		end
+	end
+
+	local function toggleBlock()
+		if not selectedEntry then setStatus("Pick a logged call first") return end
+
+		local remote = selectedEntry.remote
+		if state.blocked[remote] then
+			state.blocked[remote] = nil
+			setStatus(("Unblocked %s"):format(selectedEntry.name))
+		else
+			state.blocked[remote] = true
+			setStatus(("Blocked %s, its calls never reach the server"):format(selectedEntry.name))
+		end
+
+		syncDetail()
+	end
+
+	local function toggleIgnore()
+		if not selectedEntry then setStatus("Pick a logged call first") return end
+
+		local remote = selectedEntry.remote
+		if state.ignored[remote] then
+			state.ignored[remote] = nil
+			setStatus(("Logging %s again"):format(selectedEntry.name))
+		else
+			state.ignored[remote] = true
+			setStatus(("Hiding future calls to %s"):format(selectedEntry.name))
+		end
+
+		syncDetail()
+	end
+
+	local function copySelected()
+		if not selectedEntry then setStatus("Pick a logged call first") return end
+		if not setclipboard then setStatus("this executor has no clipboard support") return end
+
+		local source = ("%s:%s(%s)"):format(entryPath(selectedEntry),selectedEntry.method,argsBox.Text)
+		local ok = pcall(setclipboard,source)
+
+		if ok then
+			setStatus("Copied the call")
+		else
+			setStatus("Clipboard write failed")
+		end
+	end
+
+	local function clearLog()
+		state.entries = {}
+		RemoteSpy.Select(nil)
+		setStatus("Log cleared")
+	end
+
+	RemoteSpy.Init = function()
+		window = Lib.Window.new()
+		window:SetTitle("Remote Spy")
+		window:Resize(520,420)
+		RemoteSpy.Window = window
+
+		local content = window.GuiElems.Content
+
+		local clearButton = Lib.Button.new()
+		clearButton.Gui.Parent = content
+		clearButton.Gui.Position = UDim2.new(0,0,0,2)
+		clearButton.Gui.Size = UDim2.new(0,46,0,20)
+		clearButton.Gui.Text = "Clear"
+		clearButton.OnClick:Connect(clearLog)
+
+		pauseButton = Lib.Button.new()
+		pauseButton.Gui.Parent = content
+		pauseButton.Gui.Position = UDim2.new(0,50,0,2)
+		pauseButton.Gui.Size = UDim2.new(0,56,0,20)
+		pauseButton.Gui.Text = "Pause"
+		pauseButton.OnClick:Connect(function()
+			paused = not paused
+			pauseButton.Gui.Text = paused and "Resume" or "Pause"
+			setStatus(paused and "Logging paused, calls still go through" or "Logging again")
+		end)
+
+		filterBox = Lib.ViewportTextBox.new()
+		filterBox.Gui.Parent = content
+		filterBox.Position = UDim2.new(0,110,0,2)
+		filterBox.Size = UDim2.new(1,-192,0,20)
+		filterBox.TextBox.TextSize = 13
+		filterBox.TextBox.PlaceholderText = "filter by remote or argument"
+
+		local filterPadding = Instance.new("UIPadding")
+		filterPadding.Parent = filterBox.Gui
+		filterPadding.PaddingLeft = UDim.new(0,5)
+
+		filterBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
+			filterText = filterBox:GetText()
+			rebuild()
+		end)
+
+		countLabel = Lib.Label.new()
+		countLabel.Gui.Parent = content
+		countLabel.Gui.AnchorPoint = Vector2.new(1,0)
+		countLabel.Gui.Position = UDim2.new(1,0,0,2)
+		countLabel.Gui.Size = UDim2.new(0,72,0,20)
+		countLabel.Gui.TextSize = 12
+		countLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		countLabel.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		countLabel.Gui.Text = "0 logged"
+
+		listFrame = createSimple("ScrollingFrame",{
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			BottomImage = "",
+			CanvasSize = UDim2.new(0,0,0,0),
+			Name = "List",
+			Position = UDim2.new(0,0,0,26),
+			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
+			ScrollBarThickness = 12,
+			Size = UDim2.new(0.5,-6,1,-72),
+			TopImage = ""
+		})
+		listFrame.Parent = content
+
+		local layout = Instance.new("UIListLayout")
+		layout.FillDirection = Enum.FillDirection.Vertical
+		layout.Padding = UDim.new(0,1)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = listFrame
+
+		detailTitle = Lib.Label.new()
+		detailTitle.Gui.Parent = content
+		detailTitle.Gui.Position = UDim2.new(0.5,6,0,26)
+		detailTitle.Gui.Size = UDim2.new(0.5,-6,0,18)
+		detailTitle.Gui.TextSize = 13
+		detailTitle.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		detailTitle.Gui.Text = "No call selected"
+
+		detailPath = Lib.Label.new()
+		detailPath.Gui.Parent = content
+		detailPath.Gui.Position = UDim2.new(0.5,6,0,44)
+		detailPath.Gui.Size = UDim2.new(0.5,-6,0,16)
+		detailPath.Gui.TextSize = 12
+		detailPath.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		detailPath.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		detailPath.Gui.Text = ""
+
+		local editorFrame = createSimple("Frame",{
+			BackgroundColor3 = Settings.Theme.TextBox,
+			BorderColor3 = Settings.Theme.Outline3,
+			Name = "Arguments",
+			Position = UDim2.new(0.5,6,0,62),
+			Size = UDim2.new(0.5,-6,1,-108)
+		})
+		editorFrame.Parent = content
+
+		local editorPadding = Instance.new("UIPadding")
+		editorPadding.PaddingTop = UDim.new(0,3)
+		editorPadding.PaddingBottom = UDim.new(0,3)
+		editorPadding.PaddingLeft = UDim.new(0,5)
+		editorPadding.PaddingRight = UDim.new(0,3)
+		editorPadding.Parent = editorFrame
+
+		argsBox = Instance.new("TextBox")
+		argsBox.BackgroundTransparency = 1
+		argsBox.ClearTextOnFocus = false
+		argsBox.Font = Enum.Font.Code
+		argsBox.MultiLine = true
+		argsBox.Name = "Args"
+		argsBox.PlaceholderText = "arguments, as source: 123, \"hello\", {a = 1}"
+		argsBox.Size = UDim2.new(1,0,1,0)
+		argsBox.Text = ""
+		argsBox.TextColor3 = Settings.Theme.Text
+		argsBox.TextSize = 12
+		argsBox.TextWrapped = true
+		argsBox.TextXAlignment = Enum.TextXAlignment.Left
+		argsBox.TextYAlignment = Enum.TextYAlignment.Top
+		argsBox.Parent = editorFrame
+
+		local function detailButton(text,x,width,onClick)
+			local button = Lib.Button.new()
+			button.Gui.Parent = content
+			button.Gui.AnchorPoint = Vector2.new(0,1)
+			button.Gui.Position = UDim2.new(0.5,x,1,-22)
+			button.Gui.Size = UDim2.new(0,width,0,20)
+			button.Gui.Text = text
+			button.OnClick:Connect(onClick)
+			return button
+		end
+
+		detailButton("Fire",6,44,fireSelected)
+		blockButton = detailButton("Block",54,58,toggleBlock)
+		ignoreButton = detailButton("Ignore",116,58,toggleIgnore)
+		detailButton("Copy",178,44,copySelected)
+
+		statusLabel = Lib.Label.new()
+		statusLabel.Gui.Parent = content
+		statusLabel.Gui.AnchorPoint = Vector2.new(0,1)
+		statusLabel.Gui.Position = UDim2.new(0,0,1,0)
+		statusLabel.Gui.Size = UDim2.new(1,0,0,18)
+		statusLabel.Gui.TextSize = 12
+		statusLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		statusLabel.Gui.Text = "Listening for remote calls"
+
+		local hooked,hookErr = installHook()
+		if not hooked then
+			setStatus("Remote spy unavailable: " .. tostring(hookErr))
+		end
+
+		window.OnActivate:Connect(function()
+			rebuild()
+		end)
+
+		RemoteSpy.Select(nil)
+
+		task.spawn(function()
+			while true do
+				task.wait(REFRESH_INTERVAL)
+
+				if window and state.seq ~= lastSeq then
+					lastSeq = state.seq
+					pcall(rebuild)
+				end
+			end
+		end)
+	end
+
+	return RemoteSpy
+end
+
+return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+end,
+
 ["ClickFire"] = function()
 --[[
 	Click Fire Module
@@ -15931,7 +16604,7 @@ end
 local isFsSupported = readfile and writefile and isfile and isfolder and listfiles and delfile and delfolder
 
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire, ServerHop, SubplaceBrowser--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
+local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire, ServerHop, SubplaceBrowser, RemoteSpy--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
 local API, RMD
 
 -- Default Settings
@@ -16060,7 +16733,7 @@ end
 Main = (function()
 	local Main = {}
 
-	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire","ServerHop","SubplaceBrowser"}
+	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire","ServerHop","SubplaceBrowser","RemoteSpy"}
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
@@ -16290,6 +16963,7 @@ Main = (function()
 		ClickFire = Apps.ClickFire
 		ServerHop = Apps.ServerHop
 		SubplaceBrowser = Apps.SubplaceBrowser
+		RemoteSpy = Apps.RemoteSpy
 		Notebook = Apps.Notebook
 		
 		--SecretServicePanel = Apps.SecretServicePanel
@@ -16303,6 +16977,7 @@ Main = (function()
 			ClickFire = ClickFire,
 			ServerHop = ServerHop,
 			SubplaceBrowser = SubplaceBrowser,
+			RemoteSpy = RemoteSpy,
 			Notebook = Notebook,
 			
 			--SecretServicePanel = SecretServicePanel,
@@ -17302,6 +17977,8 @@ Main = (function()
 
 		Main.CreateApp({Name = "Subplace Browser", IconMap = Explorer.ClassIcons, Icon = "MeshPart", Window = SubplaceBrowser.Window})
 
+		Main.CreateApp({Name = "Remote Spy", IconMap = Explorer.ClassIcons, Icon = "RemoteEvent", Window = RemoteSpy.Window})
+
 		--Main.CreateApp({Name = "Secret Service Panel", IconMap = Main.LargeIcons, Icon = "Output", Window = SecretServicePanel.Window})
 
 
@@ -17423,6 +18100,7 @@ Main = (function()
 		ClickFire.Init()
 		ServerHop.Init()
 		SubplaceBrowser.Init()
+		RemoteSpy.Init()
 		
 		--SecretServicePanel.Init()
 		
