@@ -13939,7 +13939,7 @@ end
 end,
 ["ServerHop"] = function()
 --[[
-	Server Hop Module
+	Server Tools Module
 
 	Rejoins the current server, hops to the emptiest public server, or starts a
 	fresh one, with a pickable list of public servers
@@ -14318,7 +14318,7 @@ local function main()
 
 	ServerHop.Init = function()
 		window = Lib.Window.new()
-		window:SetTitle("Server Hop")
+		window:SetTitle("Server Tools")
 		window:Resize(350,400)
 		ServerHop.Window = window
 
@@ -14488,6 +14488,7 @@ local function main()
 	local searchToken = 0
 
 	local PAGE_SIZE = 16 -- subplaces shown per page
+	local UPDATED_PREFETCH_LIMIT = 60 -- below this many places, update times come down with the list
 
 	SubplaceBrowser.SortModes = {"Alphabetical","Recently Updated"}
 
@@ -14774,8 +14775,13 @@ local function main()
 		rebuild()
 	end
 
-	local function loadUpdateTimes()
-		if loadingTimes or #places == 0 then return end
+	local function loadUpdateTimes(quiet)
+		if #places == 0 then return end
+
+		if loadingTimes then
+			if not quiet then setStatus("Still reading update times, hang on...") end
+			return
+		end
 
 		local missing = 0
 		for i = 1,#places do
@@ -14784,11 +14790,15 @@ local function main()
 
 		if missing == 0 then
 			rebuild()
-			setStatus("Sorted by most recently updated")
+			if sortMode == "recent" then setStatus("Sorted by most recently updated") end
 			return
 		end
 
 		loadingTimes = true
+
+		if not quiet then
+			setStatus(("Reading update times for %d subplaces..."):format(missing))
+		end
 
 		task.spawn(function()
 			local done,failed = 0,0
@@ -14804,8 +14814,8 @@ local function main()
 					end
 
 					done = done + 1
-					if done % 10 == 0 then
-						setStatus(("Loading update times... %d/%d"):format(done,missing))
+					if not quiet and done % 10 == 0 then
+						setStatus(("Reading update times... %d/%d"):format(done,missing))
 					end
 
 					task.wait(0.05)
@@ -14815,10 +14825,16 @@ local function main()
 			loadingTimes = false
 			rebuild()
 
-			if failed > 0 then
-				setStatus(("Sorted by update time, %d times could not be read"):format(failed))
+			if sortMode == "recent" then
+				if failed > 0 then
+					setStatus(("Sorted by update time, %d times could not be read"):format(failed))
+				else
+					setStatus("Sorted by most recently updated")
+				end
+			elseif failed > 0 then
+				setStatus(("%d update times saved, %d could not be read"):format(done - failed,failed))
 			else
-				setStatus("Sorted by most recently updated")
+				setStatus(("%d update times saved"):format(done))
 			end
 		end)
 	end
@@ -14829,7 +14845,6 @@ local function main()
 		local shown = rebuild()
 
 		if sortMode == "recent" then
-			setStatus(("Loading update times for %d subplaces..."):format(#places))
 			loadUpdateTimes()
 		else
 			setStatus(("%d of %d subplaces"):format(shown,#places))
@@ -14856,11 +14871,18 @@ local function main()
 
 			if #places == 0 then
 				setStatus("This experience has no places listed")
-			else
-				setStatus(("%d subplaces, click one to join"):format(#places))
+				return
 			end
 
-			if sortMode == "recent" then loadUpdateTimes() end
+			setStatus(("%d subplaces, click one to join"):format(#places))
+
+			-- small universes get their update times pulled up front, so switching to
+			-- "Recently Updated" is instant instead of a wait
+			if #places <= UPDATED_PREFETCH_LIMIT then
+				loadUpdateTimes(sortMode ~= "recent")
+			elseif sortMode == "recent" then
+				loadUpdateTimes()
+			end
 		end)
 	end
 
@@ -17276,9 +17298,9 @@ Main = (function()
 
 		Main.CreateApp({Name = "Click Fire", IconMap = Explorer.ClassIcons, Icon = "ClickDetector", Window = ClickFire.Window})
 
-		Main.CreateApp({Name = "Server Hop", IconMap = Explorer.ClassIcons, Icon = "TeleportService", Window = ServerHop.Window})
+		Main.CreateApp({Name = "Server Tools", IconMap = Explorer.ClassIcons, Icon = "Humanoid", Window = ServerHop.Window})
 
-		Main.CreateApp({Name = "Subplace Browser", IconMap = Explorer.ClassIcons, Icon = "HttpService", Window = SubplaceBrowser.Window})
+		Main.CreateApp({Name = "Subplace Browser", IconMap = Explorer.ClassIcons, Icon = "MeshPart", Window = SubplaceBrowser.Window})
 
 		--Main.CreateApp({Name = "Secret Service Panel", IconMap = Main.LargeIcons, Icon = "Output", Window = SecretServicePanel.Window})
 
