@@ -13937,6 +13937,443 @@ else
 	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end
 end,
+["ClickFire"] = function()
+--[[
+	Click Fire Module
+
+	Collects ClickDetectors from the current Explorer selection (or the whole
+	workspace) and fires any subset of them in bulk
+]]
+
+-- Common Locals
+local Main,Lib,Apps,Settings -- Main Containers
+local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
+local API,RMD,env,service,plr,create,createSimple -- Main Locals
+
+local function initDeps(data)
+	Main = data.Main
+	Lib = data.Lib
+	Apps = data.Apps
+	Settings = data.Settings
+
+	API = data.API
+	RMD = data.RMD
+	env = data.env
+	service = data.service
+	plr = data.plr
+	create = data.create
+	createSimple = data.createSimple
+end
+
+local function initAfterMain()
+	Explorer = Apps.Explorer
+end
+
+local function main()
+	local ClickFire = {}
+
+	local window, listFrame, statusLabel, searchBox
+	local rows = {}
+	local found = {}
+	local checked = {}
+	local firing = false
+	local filter = ""
+	local filterToken = 0
+
+	ClickFire.Delay = 0 -- seconds to wait between fires, 0 only yields every 10
+	ClickFire.MaxScan = 5000 -- stop collecting after this many detectors
+	ClickFire.MaxRows = 250 -- rows rendered at once, the rest stay selectable
+
+	local function getFireFunc()
+		if fireclickdetector then return fireclickdetector end
+		if getgenv then
+			local g = getgenv()
+			if g then return g.fireclickdetector end
+		end
+		return nil
+	end
+
+	local function getConnsFunc()
+		if getconnections then return getconnections end
+		if getgenv then
+			local g = getgenv()
+			if g then return g.getconnections end
+		end
+		return nil
+	end
+
+	local function isAlive(det)
+		return typeof(det) == "Instance" and det.Parent ~= nil and det:IsA("ClickDetector")
+	end
+
+	-- Fires one click detector, true when something actually got fired
+	ClickFire.FireDetector = function(det)
+		if not isAlive(det) then return false end
+
+		local fire = getFireFunc()
+		if fire then
+			if pcall(fire,det) then return true end
+			-- Some executors only skip the range check when a distance is given
+			if pcall(fire,det,1e6) then return true end
+		end
+
+		local getconns = getConnsFunc()
+		if getconns then
+			local ok,conns = pcall(getconns,det.MouseClick)
+			if ok and conns then
+				local fired = false
+				for i = 1,#conns do
+					local conn = conns[i]
+					if conn and conn.Fire then
+						if pcall(conn.Fire,conn,plr) then fired = true end
+					end
+				end
+				if fired then return true end
+			end
+		end
+
+		return false
+	end
+
+	local function setStatus(text)
+		if statusLabel then statusLabel.Gui.Text = text end
+	end
+
+	local function countChecked()
+		local count = 0
+		for _ in next,checked do count = count + 1 end
+		return count
+	end
+
+	local function refreshStatus()
+		local total = #found
+		local selected = countChecked()
+
+		if total == 0 then
+			setStatus("Scan a selection or the workspace to begin")
+			return
+		end
+
+		local extra = ""
+		if #rows < total then extra = (" (showing %d)"):format(#rows) end
+		setStatus(("%d detector%s, %d selected%s"):format(total,total == 1 and "" or "s",selected,extra))
+	end
+
+	local function clearRows()
+		for i = 1,#rows do
+			rows[i]:Destroy()
+		end
+		rows = {}
+	end
+
+	local function matchesFilter(det)
+		if filter == "" then return true end
+		local parent = det.Parent
+		local label = parent and (tostring(parent.Name).." "..tostring(parent.ClassName)) or tostring(det.Name)
+		return string.find(string.lower(label),filter,1,true) ~= nil
+	end
+
+	local function createRow(det,index)
+		local parent = det.Parent
+
+		local row = createSimple("Frame",{
+			BackgroundColor3 = Color3.fromRGB(70,70,70),
+			BackgroundTransparency = (index % 2 == 0) and 0.8 or 1,
+			BorderSizePixel = 0,
+			Name = "Row",
+			Size = UDim2.new(1,-4,0,20)
+		})
+		row.Parent = listFrame
+
+		local checkbox = Lib.Checkbox.new()
+		checkbox.Gui.Parent = row
+		checkbox.Gui.Position = UDim2.new(0,2,0,2)
+		checkbox.Gui.Size = UDim2.new(0,16,0,16)
+		checkbox:SetState(checked[det] == true)
+
+		local name = Lib.Label.new()
+		name.Gui.Parent = row
+		name.Gui.Position = UDim2.new(0,24,0,0)
+		name.Gui.Size = UDim2.new(1,-98,1,0)
+		name.Gui.Text = parent and tostring(parent.Name) or tostring(det.Name)
+		name.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+
+		local class = Lib.Label.new()
+		class.Gui.Parent = row
+		class.Gui.Position = UDim2.new(1,-76,0,0)
+		class.Gui.Size = UDim2.new(0,72,1,0)
+		class.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		class.Gui.TextColor3 = Color3.fromRGB(150,150,150)
+		class.Gui.Text = parent and tostring(parent.ClassName) or "ClickDetector"
+		class.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+
+		checkbox.OnInput:Connect(function()
+			checked[det] = checkbox.Toggled and true or nil
+			refreshStatus()
+		end)
+
+		return row
+	end
+
+	local function rebuild()
+		clearRows()
+
+		local shown = 0
+		for i = 1,#found do
+			local det = found[i]
+			if isAlive(det) and matchesFilter(det) then
+				if shown >= ClickFire.MaxRows then break end
+				shown = shown + 1
+				rows[#rows+1] = createRow(det,shown)
+			end
+		end
+
+		refreshStatus()
+	end
+
+	local function scanFrom(root,list,seen)
+		if #list >= ClickFire.MaxScan then return end
+		if typeof(root) ~= "Instance" then return end
+
+		if root:IsA("ClickDetector") and not seen[root] then
+			seen[root] = true
+			list[#list+1] = root
+		end
+
+		local ok,descendants = pcall(function() return root:GetDescendants() end)
+		if not ok or not descendants then return end
+
+		for i = 1,#descendants do
+			if #list >= ClickFire.MaxScan then return end
+			local obj = descendants[i]
+			if obj:IsA("ClickDetector") and not seen[obj] then
+				seen[obj] = true
+				list[#list+1] = obj
+			end
+		end
+	end
+
+	ClickFire.GetSelectionRoots = function()
+		local roots = {}
+		local list = selection and selection.List
+		if list then
+			for i = 1,#list do
+				local item = list[i]
+				local obj = item and item.Obj
+				if obj then roots[#roots+1] = obj end
+			end
+		end
+		return roots
+	end
+
+	-- mode: "selection", "workspace", or nil for selection-then-workspace
+	ClickFire.Scan = function(mode)
+		local roots
+
+		if mode == "workspace" then
+			roots = {game:GetService("Workspace")}
+		elseif mode == "selection" then
+			roots = ClickFire.GetSelectionRoots()
+			if #roots == 0 then
+				clearRows()
+				found = {}
+				setStatus("Nothing selected - pick a folder or part in the Explorer first")
+				return
+			end
+		else
+			roots = ClickFire.GetSelectionRoots()
+			if #roots == 0 then roots = {game:GetService("Workspace")} end
+		end
+
+		local seen = {}
+		local results = {}
+		for i = 1,#roots do
+			scanFrom(roots[i],results,seen)
+		end
+
+		table.sort(results,function(a,b)
+			local an = a.Parent and tostring(a.Parent.Name) or ""
+			local bn = b.Parent and tostring(b.Parent.Name) or ""
+			an = string.lower(an)
+			bn = string.lower(bn)
+			if an == bn then return tostring(a.Name) < tostring(b.Name) end
+			return an < bn
+		end)
+
+		-- Keep ticks for detectors that survived the rescan
+		local stillFound = {}
+		for i = 1,#results do stillFound[results[i]] = true end
+		for det in next,checked do
+			if not stillFound[det] then checked[det] = nil end
+		end
+
+		found = results
+		rebuild()
+
+		if #found == 0 then
+			setStatus("No ClickDetectors found")
+		elseif #found >= ClickFire.MaxScan then
+			setStatus(("Found %d+ detectors (scan limit reached)"):format(#found))
+		end
+	end
+
+	ClickFire.SetAll = function(state)
+		if state then
+			for i = 1,#found do
+				local det = found[i]
+				if isAlive(det) then checked[det] = true end
+			end
+		else
+			checked = {}
+		end
+
+		rebuild()
+	end
+
+	ClickFire.Fire = function()
+		if firing then return end
+
+		local targets = {}
+		for det in next,checked do
+			if isAlive(det) then targets[#targets+1] = det end
+		end
+
+		if #targets == 0 then
+			setStatus("Nothing selected to fire")
+			return
+		end
+
+		if not getFireFunc() and not getConnsFunc() then
+			setStatus("This executor has neither fireclickdetector nor getconnections")
+			return
+		end
+
+		firing = true
+		local total = #targets
+		local fired = 0
+		local failed = 0
+
+		coroutine.wrap(function()
+			for i = 1,total do
+				local det = targets[i]
+				if isAlive(det) then
+					if ClickFire.FireDetector(det) then
+						fired = fired + 1
+					else
+						failed = failed + 1
+					end
+				end
+
+				if ClickFire.Delay > 0 or i % 10 == 0 then
+					if ClickFire.Delay > 0 then task.wait(ClickFire.Delay) else task.wait() end
+					setStatus(("Firing %d/%d..."):format(i,total))
+				end
+			end
+
+			firing = false
+			setStatus(("Fired %d/%d%s"):format(fired,total,failed > 0 and (" ("..failed.." failed)") or ""))
+		end)()
+	end
+
+	ClickFire.Init = function()
+		window = Lib.Window.new()
+		window:SetTitle("Click Fire")
+		window:Resize(340,380)
+		ClickFire.Window = window
+
+		local content = window.GuiElems.Content
+
+		local toolbar = createSimple("Frame",{
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Name = "ToolBar",
+			Position = UDim2.new(0,0,0,0),
+			Size = UDim2.new(1,0,0,24)
+		})
+		toolbar.Parent = content
+
+		local function addButton(text,x,width,onClick)
+			local button = Lib.Button.new()
+			button.Gui.Parent = toolbar
+			button.Gui.Position = UDim2.new(0,x,0,2)
+			button.Gui.Size = UDim2.new(0,width,0,20)
+			button.Gui.Text = text
+			button.OnClick:Connect(onClick)
+			return button
+		end
+
+		addButton("Selection",0,66,function() ClickFire.Scan("selection") end)
+		addButton("Workspace",68,74,function() ClickFire.Scan("workspace") end)
+		addButton("All",144,34,function() ClickFire.SetAll(true) end)
+		addButton("None",180,40,function() ClickFire.SetAll(false) end)
+
+		local fireButton = Lib.Button.new()
+		fireButton.Gui.Parent = toolbar
+		fireButton.Gui.AnchorPoint = Vector2.new(1,0)
+		fireButton.Gui.Position = UDim2.new(1,0,0,2)
+		fireButton.Gui.Size = UDim2.new(0,80,0,20)
+		fireButton.Gui.Text = "Fire"
+		fireButton.OnClick:Connect(function() ClickFire.Fire() end)
+
+		searchBox = Lib.ViewportTextBox.new()
+		searchBox.Gui.Parent = content
+		searchBox.Gui.Position = UDim2.new(0,0,0,26)
+		searchBox.Gui.Size = UDim2.new(1,0,0,20)
+		searchBox.TextBox.PlaceholderText = "Filter by part name"
+		searchBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
+			filter = string.lower(searchBox.TextBox.Text)
+			-- Rebuilding rows is not free, so wait for a short pause in typing
+			filterToken = filterToken + 1
+			local token = filterToken
+			task.delay(0.12,function()
+				if token == filterToken then rebuild() end
+			end)
+		end)
+
+		listFrame = createSimple("ScrollingFrame",{
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			BottomImage = "",
+			CanvasSize = UDim2.new(0,0,0,0),
+			Name = "List",
+			Position = UDim2.new(0,0,0,50),
+			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
+			ScrollBarThickness = 12,
+			Size = UDim2.new(1,0,1,-76),
+			TopImage = ""
+		})
+		listFrame.Parent = content
+
+		local layout = Instance.new("UIListLayout")
+		layout.FillDirection = Enum.FillDirection.Vertical
+		layout.Padding = UDim.new(0,1)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = listFrame
+
+		statusLabel = Lib.Label.new()
+		statusLabel.Gui.Parent = content
+		statusLabel.Gui.AnchorPoint = Vector2.new(0,1)
+		statusLabel.Gui.Position = UDim2.new(0,0,1,0)
+		statusLabel.Gui.Size = UDim2.new(1,0,0,20)
+		statusLabel.Gui.Text = "Scan a selection or the workspace to begin"
+		statusLabel.Gui.TextSize = 13
+		statusLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+
+		ClickFire.Refresh = function()
+			rebuild()
+		end
+
+		window.OnActivate:Connect(function()
+			if #found == 0 then ClickFire.Scan() end
+		end)
+	end
+
+	return ClickFire
+end
+
+return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+end,
 ["ScriptViewer"] = function()
 --[[
 	Script Viewer App Module
@@ -14289,7 +14726,7 @@ end
 local isFsSupported = readfile and writefile and isfile and isfolder and listfiles and delfile and delfolder
 
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
+local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
 local API, RMD
 
 -- Default Settings
@@ -14418,7 +14855,7 @@ end
 Main = (function()
 	local Main = {}
 
-	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer"}
+	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire"}
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
@@ -14645,6 +15082,7 @@ Main = (function()
 		Console = Apps.Console
 		SaveInstance = Apps.SaveInstance
 		ModelViewer = Apps.ModelViewer
+		ClickFire = Apps.ClickFire
 		Notebook = Apps.Notebook
 		
 		--SecretServicePanel = Apps.SecretServicePanel
@@ -14655,6 +15093,7 @@ Main = (function()
 			Console = Console,
 			SaveInstance = SaveInstance,
 			ModelViewer = ModelViewer,
+			ClickFire = ClickFire,
 			Notebook = Notebook,
 			
 			--SecretServicePanel = SecretServicePanel,
@@ -15648,6 +16087,8 @@ Main = (function()
 		
 		Main.CreateApp({Name = "3D Viewer", IconMap = Explorer.LegacyClassIcons, Icon = 54, Window = ModelViewer.Window})
 
+		Main.CreateApp({Name = "Click Fire", IconMap = Explorer.ClassIcons, Icon = 87, Window = ClickFire.Window})
+
 		--Main.CreateApp({Name = "Secret Service Panel", IconMap = Main.LargeIcons, Icon = "Output", Window = SecretServicePanel.Window})
 
 
@@ -15766,6 +16207,7 @@ Main = (function()
 		Console.Init()
 		SaveInstance.Init()
 		ModelViewer.Init()
+		ClickFire.Init()
 		
 		--SecretServicePanel.Init()
 		
