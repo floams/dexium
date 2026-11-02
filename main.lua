@@ -14477,13 +14477,17 @@ local function main()
 	local SubplaceBrowser = {}
 
 	local window, listFrame, statusLabel, searchBox, sortDrop, countLabel
+	local pageLabel, prevButton, nextButton
 	local places = {}
 	local rows = {}
 	local updatedCache = {}
 	local fetching, loadingTimes, teleporting = false, false, false
 	local sortMode = "alpha"
+	local page = 1
 	local filterText = ""
 	local searchToken = 0
+
+	local PAGE_SIZE = 16 -- subplaces shown per page
 
 	SubplaceBrowser.SortModes = {"Alphabetical","Recently Updated"}
 
@@ -14716,23 +14720,58 @@ local function main()
 		rows = {}
 	end
 
+	local function updatePager(total)
+		local totalPages = math.max(1,math.ceil(total / PAGE_SIZE))
+
+		if page > totalPages then page = totalPages end
+		if page < 1 then page = 1 end
+
+		if pageLabel then
+			if total == 0 then
+				pageLabel.Gui.Text = "nothing to show"
+			else
+				local first = (page - 1) * PAGE_SIZE + 1
+				local last = math.min(page * PAGE_SIZE,total)
+				pageLabel.Gui.Text = ("Page %d/%d  (%d-%d of %d)"):format(page,totalPages,first,last,total)
+			end
+		end
+
+		-- disable the arrows that have nowhere to go
+		if prevButton then prevButton:SetDisabled(page <= 1) end
+		if nextButton then nextButton:SetDisabled(page >= totalPages) end
+	end
+
 	local function rebuild()
 		clearRows()
 
 		local list = visiblePlaces()
-		for i = 1,#list do
+		updatePager(#list)
+
+		local first = (page - 1) * PAGE_SIZE + 1
+		local last = math.min(page * PAGE_SIZE,#list)
+
+		for i = first,last do
 			rows[#rows+1] = createRow(list[i])
 		end
 
 		if countLabel then
 			if filterText == "" then
-				countLabel.Gui.Text = ("%d subplaces"):format(#list)
+				countLabel.Gui.Text = ("%d subplaces"):format(#places)
 			else
 				countLabel.Gui.Text = ("%d of %d"):format(#list,#places)
 			end
 		end
 
+		if listFrame then
+			pcall(function() listFrame.CanvasPosition = Vector2.new(0,0) end)
+		end
+
 		return #list
+	end
+
+	local function setPage(target)
+		page = target
+		rebuild()
 	end
 
 	local function loadUpdateTimes()
@@ -14786,6 +14825,7 @@ local function main()
 
 	SubplaceBrowser.SetSort = function(mode)
 		sortMode = (mode == "Recently Updated") and "recent" or "alpha"
+		page = 1
 		local shown = rebuild()
 
 		if sortMode == "recent" then
@@ -14826,6 +14866,7 @@ local function main()
 
 	local function setFilter(text)
 		filterText = tostring(text or "")
+		page = 1
 		local shown = rebuild()
 
 		if filterText == "" then
@@ -14881,6 +14922,33 @@ local function main()
 		refreshButton.Gui.Text = "Refresh"
 		refreshButton.OnClick:Connect(function() SubplaceBrowser.Refresh() end)
 
+		prevButton = Lib.Button.new()
+		prevButton.Gui.Parent = content
+		prevButton.Gui.AnchorPoint = Vector2.new(0,1)
+		prevButton.Gui.Position = UDim2.new(0,0,1,-22)
+		prevButton.Gui.Size = UDim2.new(0,54,0,20)
+		prevButton.Gui.Text = "< Prev"
+		prevButton.OnClick:Connect(function() setPage(page - 1) end)
+
+		pageLabel = Lib.Label.new()
+		pageLabel.Gui.Parent = content
+		pageLabel.Gui.AnchorPoint = Vector2.new(0,1)
+		pageLabel.Gui.Position = UDim2.new(0,60,1,-22)
+		pageLabel.Gui.Size = UDim2.new(1,-180,0,20)
+		pageLabel.Gui.TextSize = 13
+		pageLabel.Gui.TextColor3 = Color3.fromRGB(150,150,150)
+		pageLabel.Gui.TextXAlignment = Enum.TextXAlignment.Center
+		pageLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		pageLabel.Gui.Text = "nothing to show"
+
+		nextButton = Lib.Button.new()
+		nextButton.Gui.Parent = content
+		nextButton.Gui.AnchorPoint = Vector2.new(1,1)
+		nextButton.Gui.Position = UDim2.new(1,0,1,-22)
+		nextButton.Gui.Size = UDim2.new(0,54,0,20)
+		nextButton.Gui.Text = "Next >"
+		nextButton.OnClick:Connect(function() setPage(page + 1) end)
+
 		listFrame = createSimple("ScrollingFrame",{
 			AutomaticCanvasSize = Enum.AutomaticSize.Y,
 			BackgroundTransparency = 1,
@@ -14891,7 +14959,7 @@ local function main()
 			Position = UDim2.new(0,0,0,50),
 			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
 			ScrollBarThickness = 12,
-			Size = UDim2.new(1,0,1,-76),
+			Size = UDim2.new(1,0,1,-100),
 			TopImage = ""
 		})
 		listFrame.Parent = content
