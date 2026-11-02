@@ -13937,6 +13937,445 @@ else
 	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end
 end,
+["ServerHop"] = function()
+--[[
+	Server Hop Module
+
+	Rejoins the current server, hops to the emptiest public server, or starts a
+	fresh one, with a pickable list of public servers
+]]
+
+-- Common Locals
+local Main,Lib,Apps,Settings -- Main Containers
+local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
+local API,RMD,env,service,plr,create,createSimple -- Main Locals
+
+local function initDeps(data)
+	Main = data.Main
+	Lib = data.Lib
+	Apps = data.Apps
+	Settings = data.Settings
+
+	API = data.API
+	RMD = data.RMD
+	env = data.env
+	service = data.service
+	plr = data.plr
+	create = data.create
+	createSimple = data.createSimple
+end
+
+local function initAfterMain()
+	Explorer = Apps.Explorer
+end
+
+local function main()
+	local ServerHop = {}
+
+	local window, listFrame, statusLabel, infoLabel
+	local rows = {}
+	local servers = {}
+	local fetching = false
+	local teleporting = false
+
+	ServerHop.SortOrder = "Asc" -- Asc = least full first, Desc = most full first
+
+	local function setStatus(text)
+		if statusLabel then statusLabel.Gui.Text = text end
+	end
+
+	local function getService(name)
+		local ok,svc = pcall(function() return game:GetService(name) end)
+		if ok then return svc end
+		return nil
+	end
+
+	local function httpGet(url)
+		local target = oldgame or game
+
+		if target and target.HttpGet then
+			local ok,res = pcall(target.HttpGet,target,url)
+			if ok and type(res) == "string" then return res end
+		end
+
+		local req = request or http_request
+		if req then
+			local ok,res = pcall(req,{Url = url,Method = "GET"})
+			if ok and type(res) == "table" and res.Body then return res.Body end
+		end
+
+		return nil
+	end
+
+	local function fetchServers()
+		local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=%s&limit=100",game.PlaceId,ServerHop.SortOrder)
+		local body = httpGet(url)
+
+		if not body then
+			return nil,"Could not reach the server list (no HttpGet in this executor)"
+		end
+
+		local http = getService("HttpService")
+		if not http then return nil,"HttpService unavailable" end
+
+		local ok,data = pcall(function() return http:JSONDecode(body) end)
+		if not ok or type(data) ~= "table" or type(data.data) ~= "table" then
+			return nil,"Could not read the server list"
+		end
+
+		local list = {}
+		for i = 1,#data.data do
+			local srv = data.data[i]
+			if type(srv) == "table" and type(srv.id) == "string" then
+				list[#list+1] = {
+					id = srv.id,
+					playing = tonumber(srv.playing) or 0,
+					maxPlayers = tonumber(srv.maxPlayers) or 0,
+					ping = tonumber(srv.ping)
+				}
+			end
+		end
+
+		return list
+	end
+
+	-- jobId nil means "start a fresh server"
+	local function teleportTo(jobId)
+		local tps = getService("TeleportService")
+		if not tps then
+			setStatus("TeleportService unavailable")
+			return false
+		end
+
+		local ok,res
+		if jobId then
+			ok,res = pcall(function()
+				tps:TeleportToPlaceInstance(game.PlaceId,jobId,plr)
+			end)
+		else
+			ok,res = pcall(function()
+				tps:Teleport(game.PlaceId,plr)
+			end)
+		end
+
+		if not ok then
+			setStatus("Teleport failed: "..tostring(res))
+			return false
+		end
+
+		return true
+	end
+
+	ServerHop.Rejoin = function()
+		if teleporting then setStatus("Already teleporting...") return end
+
+		local privateId = game.PrivateServerId
+		local jobId = game.JobId
+
+		if privateId and privateId ~= "" then
+			local tps = getService("TeleportService")
+			if not tps then setStatus("TeleportService unavailable") return end
+
+			teleporting = true
+			setStatus("Rejoining this private server...")
+			local ok,res = pcall(function()
+				tps:TeleportToPrivateServer(game.PlaceId,privateId,{plr})
+			end)
+			teleporting = false
+
+			if not ok then setStatus("Rejoin failed: "..tostring(res)) end
+			return
+		end
+
+		if not jobId or jobId == "" then
+			setStatus("No JobId here, hopping instead")
+			ServerHop.Hop()
+			return
+		end
+
+		teleporting = true
+		setStatus("Rejoining this server...")
+		local ok = teleportTo(jobId)
+		teleporting = false
+		if ok then setStatus("Rejoining...") end
+	end
+
+	ServerHop.NewServer = function()
+		if teleporting then setStatus("Already teleporting...") return end
+
+		teleporting = true
+		setStatus("Starting a new server...")
+		local ok = teleportTo(nil)
+		teleporting = false
+		if ok then setStatus("Creating a server...") end
+	end
+
+	ServerHop.Hop = function()
+		if teleporting then setStatus("Already teleporting...") return end
+		if fetching then setStatus("Still fetching servers...") return end
+
+		fetching = true
+		setStatus("Finding a server...")
+
+		local list,err = fetchServers()
+		fetching = false
+
+		if not list then
+			setStatus(err or "Could not fetch servers")
+			return
+		end
+
+		local current = game.JobId
+		local best,bestPlaying
+
+		for i = 1,#list do
+			local srv = list[i]
+			local open = srv.maxPlayers == 0 or srv.playing < srv.maxPlayers
+			if srv.id ~= current and open and (not bestPlaying or srv.playing < bestPlaying) then
+				best = srv
+				bestPlaying = srv.playing
+			end
+		end
+
+		if not best then
+			setStatus("No open servers, starting a new one...")
+			ServerHop.NewServer()
+			return
+		end
+
+		teleporting = true
+		setStatus(("Hopping to a %d player server..."):format(best.playing))
+		local ok = teleportTo(best.id)
+		teleporting = false
+		if ok then setStatus("Hopping...") end
+	end
+
+	local function clearRows()
+		for i = 1,#rows do rows[i]:Destroy() end
+		rows = {}
+	end
+
+	local function join(srv)
+		if teleporting then setStatus("Already teleporting...") return end
+
+		if srv.id == game.JobId then
+			setStatus("That is the server you are already in")
+			return
+		end
+
+		teleporting = true
+		setStatus(("Joining a %d player server..."):format(srv.playing))
+		local ok = teleportTo(srv.id)
+		teleporting = false
+		if ok then setStatus("Joining...") end
+	end
+
+	local function createRow(srv)
+		local isCurrent = (srv.id == game.JobId)
+
+		local row = createSimple("TextButton",{
+			AutoButtonColor = false,
+			BackgroundColor3 = Settings.Theme.Button,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Name = "Row",
+			Size = UDim2.new(1,-4,0,20),
+			Text = ""
+		})
+		row.Parent = listFrame
+
+		local players = Lib.Label.new()
+		players.Gui.Parent = row
+		players.Gui.Position = UDim2.new(0,6,0,0)
+		players.Gui.Size = UDim2.new(0,54,1,0)
+		players.Gui.Text = ("%d/%d"):format(srv.playing,srv.maxPlayers)
+		players.Gui.TextSize = 13
+
+		local job = Lib.Label.new()
+		job.Gui.Parent = row
+		job.Gui.Position = UDim2.new(0,64,0,0)
+		job.Gui.Size = UDim2.new(1,-146,1,0)
+		job.Gui.TextColor3 = Color3.fromRGB(150,150,150)
+		job.Gui.TextSize = 13
+		job.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		job.Gui.Text = srv.id:sub(1,8)..(srv.ping and ("   "..srv.ping.."ms") or "")
+
+		local action = Lib.Label.new()
+		action.Gui.Parent = row
+		action.Gui.Position = UDim2.new(1,-76,0,0)
+		action.Gui.Size = UDim2.new(0,72,1,0)
+		action.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		action.Gui.TextSize = 13
+		action.Gui.Text = isCurrent and "current" or "join"
+		action.Gui.TextColor3 = isCurrent and Color3.fromRGB(150,150,150) or Settings.Theme.ListSelection
+
+		row.MouseEnter:Connect(function()
+			if not isCurrent then row.BackgroundTransparency = 0.6 end
+		end)
+
+		row.MouseLeave:Connect(function()
+			row.BackgroundTransparency = 1
+		end)
+
+		row.MouseButton1Click:Connect(function()
+			join(srv)
+		end)
+
+		return row
+	end
+
+	local function rebuild()
+		clearRows()
+
+		local shown = 0
+		for i = 1,#servers do
+			local srv = servers[i]
+			if srv.maxPlayers == 0 or srv.playing < srv.maxPlayers then
+				shown = shown + 1
+				rows[#rows+1] = createRow(srv)
+			end
+		end
+	end
+
+	ServerHop.RefreshList = function()
+		if fetching then return end
+
+		fetching = true
+		setStatus("Fetching servers...")
+
+		coroutine.wrap(function()
+			local list,err = fetchServers()
+			fetching = false
+
+			if not list then
+				setStatus(err or "Could not fetch servers")
+				return
+			end
+
+			table.sort(list,function(a,b)
+				if a.playing == b.playing then return a.id < b.id end
+				return a.playing < b.playing
+			end)
+
+			servers = list
+			rebuild()
+
+			if #rows == 0 then
+				setStatus(("%d servers found, all full"):format(#servers))
+			else
+				setStatus(("%d servers found, click one to join"):format(#rows))
+			end
+		end)()
+	end
+
+	local function refreshInfo()
+		if not infoLabel then return end
+
+		local playersSvc = getService("Players")
+		local count = playersSvc and #playersSvc:GetPlayers() or 0
+		local maxPlayers = playersSvc and playersSvc.MaxPlayers or 0
+		local job = game.JobId
+		local jobText = (job and job ~= "") and ("job "..job:sub(1,8)) or "no job id"
+
+		infoLabel.Gui.Text = ("This server: %d/%d players, %s"):format(count,maxPlayers,jobText)
+	end
+
+	ServerHop.Init = function()
+		window = Lib.Window.new()
+		window:SetTitle("Server Hop")
+		window:Resize(350,400)
+		ServerHop.Window = window
+
+		local content = window.GuiElems.Content
+
+		local toolbar = createSimple("Frame",{
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Name = "ToolBar",
+			Position = UDim2.new(0,0,0,0),
+			Size = UDim2.new(1,0,0,24)
+		})
+		toolbar.Parent = content
+
+		local function addButton(text,x,width,onClick)
+			local button = Lib.Button.new()
+			button.Gui.Parent = toolbar
+			button.Gui.Position = UDim2.new(0,x,0,2)
+			button.Gui.Size = UDim2.new(0,width,0,20)
+			button.Gui.Text = text
+			button.OnClick:Connect(onClick)
+			return button
+		end
+
+		addButton("Rejoin",0,64,function() ServerHop.Rejoin() end)
+		addButton("Hop",66,54,function() ServerHop.Hop() end)
+		addButton("New Server",122,90,function() ServerHop.NewServer() end)
+
+		local refreshButton = Lib.Button.new()
+		refreshButton.Gui.Parent = toolbar
+		refreshButton.Gui.AnchorPoint = Vector2.new(1,0)
+		refreshButton.Gui.Position = UDim2.new(1,0,0,2)
+		refreshButton.Gui.Size = UDim2.new(0,74,0,20)
+		refreshButton.Gui.Text = "Refresh"
+		refreshButton.OnClick:Connect(function() ServerHop.RefreshList() end)
+
+		infoLabel = Lib.Label.new()
+		infoLabel.Gui.Parent = content
+		infoLabel.Gui.Position = UDim2.new(0,0,0,26)
+		infoLabel.Gui.Size = UDim2.new(1,-70,0,20)
+		infoLabel.Gui.TextSize = 13
+		infoLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		infoLabel.Gui.Text = "This server: ..."
+
+		listFrame = createSimple("ScrollingFrame",{
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			BottomImage = "",
+			CanvasSize = UDim2.new(0,0,0,0),
+			Name = "List",
+			Position = UDim2.new(0,0,0,50),
+			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
+			ScrollBarThickness = 12,
+			Size = UDim2.new(1,0,1,-76),
+			TopImage = ""
+		})
+		listFrame.Parent = content
+
+		local layout = Instance.new("UIListLayout")
+		layout.FillDirection = Enum.FillDirection.Vertical
+		layout.Padding = UDim.new(0,1)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = listFrame
+
+		statusLabel = Lib.Label.new()
+		statusLabel.Gui.Parent = content
+		statusLabel.Gui.AnchorPoint = Vector2.new(0,1)
+		statusLabel.Gui.Position = UDim2.new(0,0,1,0)
+		statusLabel.Gui.Size = UDim2.new(1,0,0,20)
+		statusLabel.Gui.Text = "Hit Refresh to list public servers"
+		statusLabel.Gui.TextSize = 13
+		statusLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+
+		refreshInfo()
+
+		local playersSvc = getService("Players")
+		if playersSvc then
+			playersSvc.PlayerAdded:Connect(function() refreshInfo() end)
+			playersSvc.PlayerRemoving:Connect(function() refreshInfo() end)
+		end
+
+		window.OnActivate:Connect(function()
+			refreshInfo()
+			if #servers == 0 then ServerHop.RefreshList() end
+		end)
+	end
+
+	return ServerHop
+end
+
+return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+end,
 ["ClickFire"] = function()
 --[[
 	Click Fire Module
@@ -14847,7 +15286,7 @@ end
 local isFsSupported = readfile and writefile and isfile and isfolder and listfiles and delfile and delfolder
 
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
+local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire, ServerHop--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
 local API, RMD
 
 -- Default Settings
@@ -14976,7 +15415,7 @@ end
 Main = (function()
 	local Main = {}
 
-	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire"}
+	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire","ServerHop"}
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
@@ -15204,6 +15643,7 @@ Main = (function()
 		SaveInstance = Apps.SaveInstance
 		ModelViewer = Apps.ModelViewer
 		ClickFire = Apps.ClickFire
+		ServerHop = Apps.ServerHop
 		Notebook = Apps.Notebook
 		
 		--SecretServicePanel = Apps.SecretServicePanel
@@ -15215,6 +15655,7 @@ Main = (function()
 			SaveInstance = SaveInstance,
 			ModelViewer = ModelViewer,
 			ClickFire = ClickFire,
+			ServerHop = ServerHop,
 			Notebook = Notebook,
 			
 			--SecretServicePanel = SecretServicePanel,
@@ -16208,7 +16649,9 @@ Main = (function()
 		
 		Main.CreateApp({Name = "3D Viewer", IconMap = Explorer.LegacyClassIcons, Icon = 54, Window = ModelViewer.Window})
 
-		Main.CreateApp({Name = "Click Fire", IconMap = Explorer.ClassIcons, Icon = 87, Window = ClickFire.Window})
+		Main.CreateApp({Name = "Click Fire", IconMap = Explorer.ClassIcons, Icon = "ClickDetector", Window = ClickFire.Window})
+
+		Main.CreateApp({Name = "Server Hop", IconMap = Explorer.ClassIcons, Icon = "TeleportService", Window = ServerHop.Window})
 
 		--Main.CreateApp({Name = "Secret Service Panel", IconMap = Main.LargeIcons, Icon = "Output", Window = SecretServicePanel.Window})
 
@@ -16329,6 +16772,7 @@ Main = (function()
 		SaveInstance.Init()
 		ModelViewer.Init()
 		ClickFire.Init()
+		ServerHop.Init()
 		
 		--SecretServicePanel.Init()
 		
