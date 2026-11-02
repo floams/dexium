@@ -904,6 +904,15 @@ local function main()
 	Explorer.RowHeight = 24 -- Height of a single tree row
 	Explorer.ToolBarHeight = 30 -- Height of the search bar area
 	Explorer.GuideCount = 8 -- Max amount of indent guide lines drawn per row
+
+	-- Zoom: ctrl + scroll wheel, or ctrl + '+' / ctrl + '-' (ctrl + 0 resets)
+	Explorer.BaseRowHeight = 24
+	Explorer.BaseEntryIndent = 20
+	Explorer.NamePad = 28
+	Explorer.Zoom = 1
+	Explorer.ZoomStep = 0.1
+	Explorer.ZoomMin = 0.55
+	Explorer.ZoomMax = 1.6
 	Explorer.RowTextColor = Color3.fromRGB(214,214,214)
 	Explorer.RowTextColorSelected = Color3.fromRGB(255,255,255)
 	Explorer.ClassTextColor = Color3.fromRGB(128,128,128)
@@ -965,6 +974,122 @@ local function main()
 		Explorer.ClearSearch()
 		Explorer.RefreshFilterMenu()
 		Explorer.ForceUpdate()
+	end
+
+	-- Rescale one row (template or live entry) to the current zoom level
+	Explorer.ApplyRowScale = function(entry)
+		if not entry then return end
+		local indent = entry:FindFirstChild("Indent")
+		if not indent then return end
+
+		local z = Explorer.Zoom
+		local font = math.max(7,math.floor(14*z + 0.5))
+		local classFont = math.max(6,math.floor(12*z + 0.5))
+		local icon = math.max(9,math.floor(16*z + 0.5))
+		local chevron = math.max(12,math.floor(20*z + 0.5))
+		local namePad = Explorer.NamePad
+
+		entry.TextSize = font
+
+		indent.EntryName.TextSize = font
+		indent.EntryName.Position = UDim2.new(0,namePad,0,0)
+
+		indent.Icon.Position = UDim2.new(0,math.max(2,namePad - 21),0,math.max(1,math.floor(3*z + 0.5)))
+		indent.Icon.Size = UDim2.new(0,icon,0,icon)
+
+		indent.Accent.Position = UDim2.new(0,0,0,math.max(2,math.floor(3*z + 0.5)))
+		indent.Accent.Size = UDim2.new(0,math.max(1,math.floor(2*z + 0.5)),1,-math.max(4,math.floor(6*z + 0.5)))
+
+		local expand = indent.Expand
+		expand.Position = UDim2.new(0,-chevron,0,math.max(1,math.floor(2*z + 0.5)))
+		expand.Size = UDim2.new(0,chevron,0,chevron)
+		expand.TextSize = font
+		expand.Icon.Size = UDim2.new(0,icon,0,icon)
+		expand.Icon.Position = UDim2.new(0,math.floor((chevron-icon)/2),0,math.floor((chevron-icon)/2))
+
+		entry.Class.TextSize = classFont
+	end
+
+	-- 1 = default size, lower shows more rows. Rescales rows, then redraws
+	Explorer.SetZoom = function(value)
+		local z = math.clamp(value,Explorer.ZoomMin,Explorer.ZoomMax)
+		z = math.floor(z/Explorer.ZoomStep + 0.5)*Explorer.ZoomStep
+		if math.abs(z - Explorer.Zoom) < 0.001 then return end
+
+		Explorer.Zoom = z
+		Explorer.RowHeight = math.max(12,math.floor(Explorer.BaseRowHeight*z + 0.5))
+		Explorer.EntryIndent = math.max(8,math.floor(Explorer.BaseEntryIndent*z + 0.5))
+		Explorer.NamePad = math.max(13,math.floor(28*z + 0.5))
+
+		if scrollH then scrollH.WheelIncrement = Explorer.EntryIndent end
+		if entryTemplate then Explorer.ApplyRowScale(entryTemplate) end
+		if listEntries then
+			for _,entry in next,listEntries do
+				if typeof(entry) == "Instance" then Explorer.ApplyRowScale(entry) end
+			end
+		end
+		if renameBox then renameBox.TextSize = math.max(8,math.floor(14*z + 0.5)) end
+		if Explorer.EmptyLabel then
+			Explorer.EmptyLabel.TextSize = math.max(8,math.floor(13*z + 0.5))
+			Explorer.EmptyLabel.Position = UDim2.new(0,0,0,math.max(10,math.floor(28*z + 0.5)))
+		end
+
+		Explorer.ForceUpdate()
+	end
+
+	Explorer.InitZoom = function()
+		local uis = service.UserInputService
+
+		local function overExplorer()
+			local win = Explorer.Window
+			local main = win and win.GuiElems.Main
+			if not main or not win:IsVisible() then return false end
+			return Lib.CheckMouseInGui(main)
+		end
+
+		local function bump(dir)
+			Explorer.SetZoom(Explorer.Zoom + Explorer.ZoomStep*dir)
+		end
+
+		-- While ctrl is held the wheel is a zoom gesture, so keep the tree from
+		-- scrolling under it. The GUI wheel events land in the same step, so the
+		-- increments are put back on the next RenderStepped.
+		local function muteWheel()
+			if not scrollV or not scrollH then return end
+			scrollV.WheelIncrement = 0
+			scrollH.WheelIncrement = 0
+			coroutine.wrap(function()
+				Lib.FastWait()
+				if scrollV then scrollV.WheelIncrement = 3 end
+				if scrollH then scrollH.WheelIncrement = Explorer.EntryIndent end
+			end)()
+		end
+
+		uis.InputChanged:Connect(function(input)
+			if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+			if not Lib.IsCtrlDown() or not overExplorer() then return end
+			muteWheel()
+			bump(input.Position.Z > 0 and 1 or -1)
+		end)
+
+		uis.InputBegan:Connect(function(input,processed)
+			if processed then return end
+			local key = input.KeyCode
+			local isIn = (key == Enum.KeyCode.Equals or key == Enum.KeyCode.KeypadPlus)
+			local isOut = (key == Enum.KeyCode.Minus or key == Enum.KeyCode.KeypadMinus)
+			local isReset = (key == Enum.KeyCode.Zero or key == Enum.KeyCode.KeypadZero)
+			if not (isIn or isOut or isReset) then return end
+
+			local win = Explorer.Window
+			if not win or not win:IsVisible() then return end
+			if not Lib.IsCtrlDown() then return end
+
+			if isReset then
+				Explorer.SetZoom(1)
+			else
+				bump(isIn and 1 or -1)
+			end
+		end)
 	end
 
 	-- True when the selection is, or contains, a ClickDetector
@@ -1504,6 +1629,7 @@ local function main()
 			guides[i] = newEntry:FindFirstChild("Guide"..i)
 		end
 		Explorer.GuidesByEntry[newEntry] = guides
+		Explorer.ApplyRowScale(newEntry)
 
 		local isRenaming = false
 
@@ -1675,7 +1801,7 @@ local function main()
 				entry.Indent.EntryName.Text = tostring(node.Obj)
 				entry.Indent.EntryName.TextColor3 = selected and Explorer.RowTextColorSelected or Explorer.RowTextColor
 				entry.Indent.EntryName.Font = selected and Enum.Font.SourceSansBold or Enum.Font.SourceSans
-				entry.Indent.EntryName.Size = UDim2.new(1,-(34+classSpace),1,0)
+				entry.Indent.EntryName.Size = UDim2.new(1,-(Explorer.NamePad+6+classSpace),1,0)
 				entry.Indent.Position = UDim2.new(0,depth,0,1)
 				entry.Indent.Size = UDim2.new(1,-(depth+6),1,-2)
 
@@ -1708,7 +1834,7 @@ local function main()
 
 				if node == renamingNode then
 					renameNodeVisible = true
-					renameBox.Position = UDim2.new(0,depth+28-scrollH.Index,0,entry.Position.Y.Offset+4)
+					renameBox.Position = UDim2.new(0,depth+Explorer.NamePad-scrollH.Index,0,entry.Position.Y.Offset+4)
 					renameBox.Visible = true
 				end
 
@@ -3823,6 +3949,7 @@ return search]==]
 		Explorer.InitRenameBox()
 		Explorer.InitSearch()
 		Explorer.InitDelCleaner()
+		Explorer.InitZoom()
 		selection.Changed:Connect(Explorer.UpdateSelectionVisuals)
 
 		-- Window events
