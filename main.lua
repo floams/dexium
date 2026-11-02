@@ -13972,7 +13972,7 @@ end
 local function main()
 	local ServerHop = {}
 
-	local window, listFrame, statusLabel, infoLabel
+	local window, listFrame, statusLabel, infoLabel, placeBox
 	local rows = {}
 	local servers = {}
 	local fetching = false
@@ -14148,6 +14148,42 @@ local function main()
 		local ok = teleportTo(best.id)
 		teleporting = false
 		if ok then setStatus("Hopping...") end
+	end
+
+	-- Joins any place by id, including subplaces of this experience
+	ServerHop.JoinPlace = function(placeId)
+		if teleporting then setStatus("Already teleporting...") return end
+
+		local id = tonumber(placeId)
+		if not id or id <= 0 or id ~= math.floor(id) then
+			setStatus("Enter a place or subplace id first")
+			return
+		end
+
+		if id == game.PlaceId then
+			setStatus("You are already in that place")
+			return
+		end
+
+		local tps = getService("TeleportService")
+		if not tps then setStatus("TeleportService unavailable") return end
+
+		teleporting = true
+		setStatus(("Joining place %d..."):format(id))
+
+		local ok,res = pcall(function() tps:Teleport(id,plr) end)
+		if not ok and tps.TeleportAsync then
+			ok,res = pcall(function() tps:TeleportAsync(id,{plr}) end)
+		end
+
+		teleporting = false
+
+		if not ok then
+			setStatus("Place join failed: "..tostring(res))
+			return
+		end
+
+		setStatus(("Joining place %d..."):format(id))
 	end
 
 	local function clearRows()
@@ -14327,6 +14363,35 @@ local function main()
 		infoLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 		infoLabel.Gui.Text = "This server: ..."
 
+		local idLabel = Lib.Label.new()
+		idLabel.Gui.Parent = content
+		idLabel.Gui.Position = UDim2.new(0,4,0,48)
+		idLabel.Gui.Size = UDim2.new(0,24,0,20)
+		idLabel.Gui.TextSize = 13
+		idLabel.Gui.Text = "ID:"
+
+		placeBox = Lib.ViewportTextBox.new()
+		placeBox.Gui.Parent = content
+		placeBox.Position = UDim2.new(0,30,0,48)
+		placeBox.Size = UDim2.new(1,-124,0,20)
+		placeBox.TextBox.TextSize = 13
+		placeBox.TextBox.PlaceholderText = "place or subplace id"
+
+		local boxPadding = Instance.new("UIPadding")
+		boxPadding.Parent = placeBox.Gui
+		boxPadding.PaddingLeft = UDim.new(0,5)
+
+		local joinPlaceButton = Lib.Button.new()
+		joinPlaceButton.Gui.Parent = content
+		joinPlaceButton.Gui.Position = UDim2.new(1,-92,0,48)
+		joinPlaceButton.Gui.Size = UDim2.new(0,92,0,20)
+		joinPlaceButton.Gui.Text = "Join Place"
+		joinPlaceButton.OnClick:Connect(function() ServerHop.JoinPlace(placeBox:GetText()) end)
+
+		placeBox.TextBox.FocusLost:Connect(function(enterPressed)
+			if enterPressed then ServerHop.JoinPlace(placeBox:GetText()) end
+		end)
+
 		listFrame = createSimple("ScrollingFrame",{
 			AutomaticCanvasSize = Enum.AutomaticSize.Y,
 			BackgroundTransparency = 1,
@@ -14334,10 +14399,10 @@ local function main()
 			BottomImage = "",
 			CanvasSize = UDim2.new(0,0,0,0),
 			Name = "List",
-			Position = UDim2.new(0,0,0,50),
+			Position = UDim2.new(0,0,0,74),
 			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
 			ScrollBarThickness = 12,
-			Size = UDim2.new(1,0,1,-76),
+			Size = UDim2.new(1,0,1,-100),
 			TopImage = ""
 		})
 		listFrame.Parent = content
