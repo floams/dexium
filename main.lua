@@ -17187,7 +17187,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.25" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.26" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
@@ -18507,7 +18507,7 @@ Main = (function()
 		local ok = pcall(function()
 			if Main.Outdated and Main.LatestVersion then
 				button.Text = ("Version: %s <font color=\"#e88c8c\"><b>[OUTDATED!]</b></font>"):format(Main.Version)
-			elseif Main.VersionChecked then
+			elseif Main.VersionChecked and not Main.LatestVersion then
 				button.Text = ("Version: %s <font color=\"#8a8a8a\">could not check</font>"):format(Main.Version)
 			else
 				button.Text = ("Version: %s"):format(Main.Version)
@@ -18652,6 +18652,7 @@ Main = (function()
 			Main.VersionChecked = true
 
 			if not latest then
+				warn(("Dexium: no version found at %s (%s)"):format(Main.VersionUrl, raw and ("got %d bytes"):format(#raw) or "request failed"))
 				Main.RefreshVersionDisplay()
 				return
 			end
