@@ -13978,13 +13978,14 @@ end
 local function main()
 	local ServerHop = {}
 
-	local window, listFrame, statusLabel, infoLabel, placeBox
+	local window, listFrame, statusLabel, infoLabel, uptimeLabel, placeBox, currentUptimeLabel
 	local rows = {}
 	local servers = {}
 	local fetching = false
 	local teleporting = false
 
 	ServerHop.SortOrder = "Asc" -- Asc = least full first, Desc = most full first
+	ServerHop.LoadTime = os.time() -- fallback clock, in case the server time is missing
 
 	local function setStatus(text)
 		if statusLabel then statusLabel.Gui.Text = text end
@@ -14011,6 +14012,29 @@ local function main()
 		end
 
 		return nil
+	end
+
+	-- Roblox's public server list carries no start time for the servers it lists, so
+	-- the only uptime we can read exactly is the one for the server we are running on
+	local function formatUptime(seconds)
+		seconds = math.max(0,math.floor(tonumber(seconds) or 0))
+
+		local days = math.floor(seconds / 86400)
+		local hours = math.floor(seconds % 86400 / 3600)
+		local minutes = math.floor(seconds % 3600 / 60)
+
+		if days > 0 then return ("%dd %dh"):format(days,hours) end
+		if hours > 0 then return ("%dh %dm"):format(hours,minutes) end
+		if minutes > 0 then return ("%dm %ds"):format(minutes,seconds % 60) end
+		return ("%ds"):format(seconds)
+	end
+
+	local function serverUptime()
+		local ws = getService("Workspace")
+		local seconds = ws and tonumber(ws.DistributedGameTime)
+		if seconds and seconds >= 0 then return seconds end
+
+		return math.max(0,os.time() - (ServerHop.LoadTime or os.time()))
 	end
 
 	local function fetchServers()
@@ -14195,6 +14219,7 @@ local function main()
 	local function clearRows()
 		for i = 1,#rows do rows[i]:Destroy() end
 		rows = {}
+		currentUptimeLabel = nil
 	end
 
 	local function join(srv)
@@ -14250,6 +14275,18 @@ local function main()
 		action.Gui.TextSize = 13
 		action.Gui.Text = isCurrent and "current" or "join"
 		action.Gui.TextColor3 = isCurrent and Color3.fromRGB(150,150,150) or Settings.Theme.ListSelection
+
+		if isCurrent then
+			local up = Lib.Label.new()
+			up.Gui.Parent = row
+			up.Gui.Position = UDim2.new(1,-142,0,0)
+			up.Gui.Size = UDim2.new(0,60,1,0)
+			up.Gui.TextXAlignment = Enum.TextXAlignment.Right
+			up.Gui.TextColor3 = Color3.fromRGB(150,150,150)
+			up.Gui.TextSize = 13
+			up.Gui.Text = "up "..formatUptime(serverUptime())
+			currentUptimeLabel = up
+		end
 
 		row.MouseEnter:Connect(function()
 			if not isCurrent then row.BackgroundTransparency = 0.6 end
@@ -14320,6 +14357,10 @@ local function main()
 		local jobText = (job and job ~= "") and ("job "..job:sub(1,8)) or "no job id"
 
 		infoLabel.Gui.Text = ("This server: %d/%d players, %s"):format(count,maxPlayers,jobText)
+
+		local uptime = formatUptime(serverUptime())
+		if uptimeLabel then uptimeLabel.Gui.Text = "up "..uptime end
+		if currentUptimeLabel then currentUptimeLabel.Gui.Text = "up "..uptime end
 	end
 
 	ServerHop.Init = function()
@@ -14368,6 +14409,15 @@ local function main()
 		infoLabel.Gui.TextSize = 13
 		infoLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 		infoLabel.Gui.Text = "This server: ..."
+
+		uptimeLabel = Lib.Label.new()
+		uptimeLabel.Gui.Parent = content
+		uptimeLabel.Gui.Position = UDim2.new(1,-68,0,26)
+		uptimeLabel.Gui.Size = UDim2.new(0,68,0,20)
+		uptimeLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		uptimeLabel.Gui.TextSize = 13
+		uptimeLabel.Gui.TextColor3 = Settings.Theme.ListSelection
+		uptimeLabel.Gui.Text = "up ..."
 
 		local idLabel = Lib.Label.new()
 		idLabel.Gui.Parent = content
@@ -14440,6 +14490,20 @@ local function main()
 			refreshInfo()
 			if #servers == 0 then ServerHop.RefreshList() end
 		end)
+
+		-- uptime is read off the running server, so keep the readout ticking
+		local runService = getService("RunService")
+		if runService then
+			local lastSecond = os.time()
+
+			runService.Heartbeat:Connect(function()
+				local now = os.time()
+				if now == lastSecond then return end
+
+				lastSecond = now
+				refreshInfo()
+			end)
+		end
 	end
 
 	return ServerHop
@@ -19003,7 +19067,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.30" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.31" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
