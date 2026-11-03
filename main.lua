@@ -15357,6 +15357,9 @@ local function main()
 			original = hookmetamethod(game,"__namecall",function(self,...)
 				local method = getnamecallmethod()
 
+				-- after an unload the hook is inert even if the executor cannot restore it
+				if not state.hooked then return original(self,...) end
+
 				if method == "FireServer" or method == "InvokeServer" then
 					if state.blocked[self] then
 						return
