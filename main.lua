@@ -14862,24 +14862,35 @@ local function main()
 		-- in update order the date explains the order, otherwise show the place id
 		info.Gui.Text = (sortMode == "recent" and formatDate(updatedCache[place.id])) or tostring(place.id)
 
-		-- the id is handy outside the window, so every row can copy it; the row's
-		-- click hit tests this label so copying does not also join
-		local copy = Lib.Label.new()
-		copy.Gui.Parent = row
-		copy.Gui.Position = UDim2.new(1,-96,0,0)
-		copy.Gui.Size = UDim2.new(0,40,1,0)
-		copy.Gui.TextSize = 12
-		copy.Gui.TextXAlignment = Enum.TextXAlignment.Right
-		copy.Gui.TextColor3 = Color3.fromRGB(150,150,150)
-		copy.Gui.TextTruncate = Enum.TextTruncate.AtEnd
-		copy.Gui.Text = "copy"
+		-- the id is handy outside the window, so every row can copy it; this is its
+		-- own button above the row's, so the click never reaches the row's join
+		local copy = createSimple("TextButton",{
+			AutoButtonColor = false,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Font = Enum.Font.SourceSans,
+			Name = "CopyId",
+			Parent = row,
+			Position = UDim2.new(1,-96,0,0),
+			Size = UDim2.new(0,40,1,0),
+			Text = "copy",
+			TextColor3 = Color3.fromRGB(150,150,150),
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			ZIndex = 2
+		})
 
-		copy.Gui.MouseEnter:Connect(function()
-			copy.Gui.TextColor3 = Settings.Theme.ListSelection
+		copy.MouseEnter:Connect(function()
+			copy.TextColor3 = Settings.Theme.ListSelection
 		end)
 
-		copy.Gui.MouseLeave:Connect(function()
-			copy.Gui.TextColor3 = Color3.fromRGB(150,150,150)
+		copy.MouseLeave:Connect(function()
+			copy.TextColor3 = Color3.fromRGB(150,150,150)
+		end)
+
+		copy.MouseButton1Click:Connect(function()
+			copyPlaceId(place)
 		end)
 
 		local action = Lib.Label.new()
@@ -14900,13 +14911,19 @@ local function main()
 		end)
 
 		row.MouseButton1Click:Connect(function()
+			-- GetMouseLocation counts from the screen, AbsolutePosition from below the
+			-- topbar, so drop the inset before comparing; a few px of slack for fat mice
 			local uis = getService("UserInputService")
+			local guiService = getService("GuiService")
 			local mouse = uis and uis:GetMouseLocation()
 
-			if mouse then
-				local pos, size = copy.Gui.AbsolutePosition, copy.Gui.AbsoluteSize
-				if mouse.X >= pos.X and mouse.X <= pos.X + size.X
-				and mouse.Y >= pos.Y and mouse.Y <= pos.Y + size.Y then
+			if mouse and guiService then
+				local inset = guiService:GetGuiInset()
+				if inset then mouse = mouse - inset end
+
+				local pos, size = copy.AbsolutePosition, copy.AbsoluteSize
+				if mouse.X >= pos.X - 6 and mouse.X <= pos.X + size.X + 6
+				and mouse.Y >= pos.Y - 2 and mouse.Y <= pos.Y + size.Y + 2 then
 					copyPlaceId(place)
 					return
 				end
@@ -19199,7 +19216,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.34" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.35" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
