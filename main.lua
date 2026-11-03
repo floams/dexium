@@ -13948,7 +13948,8 @@ end,
 	Server Tools Module
 
 	Rejoins the current server, hops to the emptiest public server, or starts a
-	fresh one, with a pickable list of public servers
+	fresh one, with a pickable list of public servers. Typing a place or subplace
+	id in the box lists that place's servers, a job id per row, without joining
 ]]
 
 -- Common Locals
@@ -13983,6 +13984,8 @@ local function main()
 	local servers = {}
 	local fetching = false
 	local teleporting = false
+	local listPlaceId = game.PlaceId -- whose servers the list is showing
+	local listToken, boxToken = 0, 0
 
 	ServerHop.SortOrder = "Asc" -- Asc = least full first, Desc = most full first
 	ServerHop.LoadTime = os.time() -- fallback clock, in case the server time is missing
@@ -14037,8 +14040,9 @@ local function main()
 		return math.max(0,os.time() - (ServerHop.LoadTime or os.time()))
 	end
 
-	local function fetchServers()
-		local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=%s&limit=100",game.PlaceId,ServerHop.SortOrder)
+	local function fetchServers(placeId)
+		local target = tonumber(placeId) or game.PlaceId
+		local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=%s&limit=100",target,ServerHop.SortOrder)
 		local body = httpGet(url)
 
 		if not body then
@@ -14069,8 +14073,10 @@ local function main()
 		return list
 	end
 
-	-- jobId nil means "start a fresh server"
-	local function teleportTo(jobId)
+	-- jobId nil means "start a fresh server", and the place defaults to this one
+	local function teleportTo(jobId,placeId)
+		local place = tonumber(placeId) or game.PlaceId
+
 		local tps = getService("TeleportService")
 		if not tps then
 			setStatus("TeleportService unavailable")
@@ -14080,11 +14086,11 @@ local function main()
 		local ok,res
 		if jobId then
 			ok,res = pcall(function()
-				tps:TeleportToPlaceInstance(game.PlaceId,jobId,plr)
+				tps:TeleportToPlaceInstance(place,jobId,plr)
 			end)
 		else
 			ok,res = pcall(function()
-				tps:Teleport(game.PlaceId,plr)
+				tps:Teleport(place,plr)
 			end)
 		end
 
@@ -14147,7 +14153,7 @@ local function main()
 		fetching = true
 		setStatus("Finding a server...")
 
-		local list,err = fetchServers()
+		local list,err = fetchServers(game.PlaceId)
 		fetching = false
 
 		if not list then
@@ -14175,7 +14181,7 @@ local function main()
 
 		teleporting = true
 		setStatus(("Hopping to a %d player server..."):format(best.playing))
-		local ok = teleportTo(best.id)
+		local ok = teleportTo(best.id,game.PlaceId)
 		teleporting = false
 		if ok then setStatus("Hopping...") end
 	end
@@ -14232,13 +14238,13 @@ local function main()
 
 		teleporting = true
 		setStatus(("Joining a %d player server..."):format(srv.playing))
-		local ok = teleportTo(srv.id)
+		local ok = teleportTo(srv.id,listPlaceId)
 		teleporting = false
 		if ok then setStatus("Joining...") end
 	end
 
 	local function createRow(srv)
-		local isCurrent = (srv.id == game.JobId)
+		local isCurrent = (srv.id == game.JobId and listPlaceId == game.PlaceId)
 
 		local row = createSimple("TextButton",{
 			AutoButtonColor = false,
@@ -14316,14 +14322,40 @@ local function main()
 		end
 	end
 
+	-- the list follows the id typed into the box, and this place when it is empty
+	local function describePlace(placeId)
+		if placeId == game.PlaceId then return nil end
+		return ("place %d"):format(placeId)
+	end
+
+	ServerHop.ListPlace = function(placeId)
+		local id = tonumber(placeId) or game.PlaceId
+		if id == listPlaceId and (#servers > 0 or fetching) then return end
+
+		listPlaceId = id
+		servers = {}
+		rebuild()
+		ServerHop.RefreshList()
+	end
+
 	ServerHop.RefreshList = function()
 		if fetching then return end
 
+		listToken = listToken + 1
+		local token = listToken
+		local placeId = listPlaceId
+		local where = describePlace(placeId)
+
 		fetching = true
-		setStatus("Fetching servers...")
+		if where then
+			setStatus(("Fetching servers of %s..."):format(where))
+		else
+			setStatus("Fetching servers...")
+		end
 
 		coroutine.wrap(function()
-			local list,err = fetchServers()
+			local list,err = fetchServers(placeId)
+			if token ~= listToken then return end -- a newer list took over
 			fetching = false
 
 			if not list then
@@ -14340,7 +14372,13 @@ local function main()
 			rebuild()
 
 			if #rows == 0 then
-				setStatus(("%d servers found, all full"):format(#servers))
+				if where then
+					setStatus(("%d servers in %s, all full"):format(#servers,where))
+				else
+					setStatus(("%d servers found, all full"):format(#servers))
+				end
+			elseif where then
+				setStatus(("%d servers in %s, click one to join"):format(#rows,where))
 			else
 				setStatus(("%d servers found, click one to join"):format(#rows))
 			end
@@ -14448,6 +14486,30 @@ local function main()
 			if enterPressed then ServerHop.JoinPlace(placeBox:GetText()) end
 		end)
 
+		-- typing an id lists that place's job ids, so the box works without joining
+		placeBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
+			boxToken = boxToken + 1
+			local token = boxToken
+
+			task.delay(0.5,function()
+				if token ~= boxToken then return end
+				if not placeBox then return end
+
+				local text = (placeBox:GetText() or ""):gsub("%s","")
+				local id = tonumber(text)
+
+				if text == "" then
+					ServerHop.ListPlace(game.PlaceId)
+				elseif not id or id <= 0 or id ~= math.floor(id) then
+					servers = {}
+					rebuild()
+					setStatus("That is not a place id")
+				else
+					ServerHop.ListPlace(id)
+				end
+			end)
+		end)
+
 		listFrame = createSimple("ScrollingFrame",{
 			AutomaticCanvasSize = Enum.AutomaticSize.Y,
 			BackgroundTransparency = 1,
@@ -14516,7 +14578,8 @@ end,
 	Subplace Browser Module
 
 	Lists every place in this experience's universe with search and sorting, and
-	teleports to whichever place you pick
+	teleports to whichever place you pick. Each row also copies its place id, ready
+	to paste into Server Tools to see that place's servers
 ]]
 
 -- Common Locals
@@ -14596,6 +14659,14 @@ local function main()
 		local ok,data = pcall(function() return http:JSONDecode(body) end)
 		if ok and type(data) == "table" then return data end
 		return nil
+	end
+
+	local function copyText(text)
+		local fn = env.setclipboard or setclipboard
+		if not fn then return false end
+
+		local ok = pcall(fn,text)
+		return ok
 	end
 
 	-- game.GameId is the universe id, the web call is only a fallback
@@ -14729,6 +14800,14 @@ local function main()
 		if not ok then setStatus("Join failed: "..tostring(res)) end
 	end
 
+	local function copyPlaceId(place)
+		if copyText(tostring(place.id)) then
+			setStatus(("Copied place id %d"):format(place.id))
+		else
+			setStatus("This executor has no clipboard support")
+		end
+	end
+
 	local function createRow(place)
 		local isCurrent = (place.id == game.PlaceId)
 
@@ -14746,21 +14825,41 @@ local function main()
 		local name = Lib.Label.new()
 		name.Gui.Parent = row
 		name.Gui.Position = UDim2.new(0,6,0,0)
-		name.Gui.Size = UDim2.new(1,-146,1,0)
+		name.Gui.Size = UDim2.new(1,-190,1,0)
 		name.Gui.TextSize = 13
 		name.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 		name.Gui.Text = place.name
 
 		local info = Lib.Label.new()
 		info.Gui.Parent = row
-		info.Gui.Position = UDim2.new(1,-138,0,0)
-		info.Gui.Size = UDim2.new(0,84,1,0)
+		info.Gui.Position = UDim2.new(1,-184,0,0)
+		info.Gui.Size = UDim2.new(0,86,1,0)
 		info.Gui.TextXAlignment = Enum.TextXAlignment.Right
 		info.Gui.TextColor3 = Color3.fromRGB(150,150,150)
 		info.Gui.TextSize = 12
 		info.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 		-- in update order the date explains the order, otherwise show the place id
 		info.Gui.Text = (sortMode == "recent" and formatDate(updatedCache[place.id])) or tostring(place.id)
+
+		-- the id is handy outside the window, so every row can copy it; the row's
+		-- click hit tests this label so copying does not also join
+		local copy = Lib.Label.new()
+		copy.Gui.Parent = row
+		copy.Gui.Position = UDim2.new(1,-96,0,0)
+		copy.Gui.Size = UDim2.new(0,40,1,0)
+		copy.Gui.TextSize = 12
+		copy.Gui.TextXAlignment = Enum.TextXAlignment.Right
+		copy.Gui.TextColor3 = Color3.fromRGB(150,150,150)
+		copy.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		copy.Gui.Text = "copy"
+
+		copy.Gui.MouseEnter:Connect(function()
+			copy.Gui.TextColor3 = Settings.Theme.ListSelection
+		end)
+
+		copy.Gui.MouseLeave:Connect(function()
+			copy.Gui.TextColor3 = Color3.fromRGB(150,150,150)
+		end)
 
 		local action = Lib.Label.new()
 		action.Gui.Parent = row
@@ -14780,6 +14879,18 @@ local function main()
 		end)
 
 		row.MouseButton1Click:Connect(function()
+			local uis = getService("UserInputService")
+			local mouse = uis and uis:GetMouseLocation()
+
+			if mouse then
+				local pos, size = copy.Gui.AbsolutePosition, copy.Gui.AbsoluteSize
+				if mouse.X >= pos.X and mouse.X <= pos.X + size.X
+				and mouse.Y >= pos.Y and mouse.Y <= pos.Y + size.Y then
+					copyPlaceId(place)
+					return
+				end
+			end
+
 			joinPlace(place)
 		end)
 
@@ -19067,7 +19178,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.31" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.32" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
