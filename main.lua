@@ -15059,17 +15059,82 @@ local function main()
 
 	local unpack,pack = table.unpack,table.pack
 
-	local window, listFrame, statusLabel, filterBox, pauseButton, spamButton, countLabel
+	local window, statusLabel, filterBox, sortDrop, countLabel
+	local listFrame, emptyLabel, tabButtons
 	local detailTitle, detailPath, callerLabel, callLabel, argsBox
-	local prevButton, nextButton, blockButton, ignoreButton
-	local sortDrop, emptyLabel
+	local prevButton, nextButton, blockButton, ignoreButton, pauseButton, spamButton
 	local rows = {}
 	local selectedLog
 	local callIndex = 1
 	local paused = false
 	local filterText = ""
 	local sortMode = "Newest first"
+	local activeMethod = "FireServer"
 	local lastSeq = -1
+
+	-- Cobalt's palette: near black surfaces with one accent per call kind
+	local C = {
+		body = Color3.fromRGB(18,18,18),
+		panel = Color3.fromRGB(22,22,22),
+		card = Color3.fromRGB(32,32,32),
+		hover = Color3.fromRGB(44,44,44),
+		chosen = Color3.fromRGB(52,52,52),
+		line = Color3.fromRGB(40,40,40),
+		text = Color3.fromRGB(238,238,238),
+		muted = Color3.fromRGB(146,146,146),
+		dim = Color3.fromRGB(108,108,108),
+		blue = Color3.fromRGB(104,162,247),
+		amber = Color3.fromRGB(230,172,98),
+		red = Color3.fromRGB(232,124,124),
+		warn = Color3.fromRGB(46,40,30)
+	}
+
+	-- every pressable thing in this app is one of these flat dark chips
+	local function makeButton(text,fill,textColor,onClick)
+		local button = Instance.new("TextButton")
+		button.AutoButtonColor = false
+		button.BackgroundColor3 = fill or C.card
+		button.BorderSizePixel = 0
+		button.Font = Enum.Font.Gotham
+		button.Size = UDim2.new(0,100,0,24)
+		button.Text = text
+		button.TextColor3 = textColor or C.text
+		button.TextSize = 12
+		button.TextTruncate = Enum.TextTruncate.AtEnd
+
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0,5)
+		corner.Parent = button
+
+		local obj = {
+			Gui = button,
+			Disabled = false,
+			Fill = fill or C.card
+		}
+
+		function obj:SetDisabled(disabled)
+			self.Disabled = disabled
+			button.TextTransparency = disabled and 0.5 or 0
+			button.BackgroundTransparency = disabled and 0.7 or 0
+		end
+
+		button.MouseEnter:Connect(function()
+			if obj.Disabled then return end
+			button.BackgroundColor3 = (obj.Fill == C.card) and C.hover or obj.Fill:Lerp(Color3.new(1,1,1),0.12)
+		end)
+
+		button.MouseLeave:Connect(function()
+			if obj.Disabled then return end
+			button.BackgroundColor3 = obj.Fill
+		end)
+
+		button.MouseButton1Click:Connect(function()
+			if obj.Disabled or not onClick then return end
+			onClick()
+		end)
+
+		return obj
+	end
 
 	local MAX_LOGS = 120 -- remotes remembered at once
 	local MAX_SHOWN = 120 -- rows drawn at once
@@ -15105,10 +15170,11 @@ local function main()
 	local function updateCount(shown)
 		if not countLabel then return end
 
+		local total = shown or #rows
 		if filterText == "" then
-			countLabel.Gui.Text = ("%d remotes"):format(#state.logs)
+			countLabel.Gui.Text = tostring(total)
 		else
-			countLabel.Gui.Text = ("%d of %d"):format(shown or #rows,#state.logs)
+			countLabel.Gui.Text = ("%d/%d"):format(total,#state.logs)
 		end
 	end
 
@@ -15142,12 +15208,13 @@ local function main()
 			or log.className:lower():find(needle,1,true)
 	end
 
-	-- one colour per method, so the left edge of a row reads at a glance
+	-- one accent per call kind, the same colours the tabs use
 	local function methodColor(method)
-		if method == "InvokeServer" then return Color3.fromRGB(226,168,92) end
-		if method == "FireServer" then return Color3.fromRGB(108,168,238) end
-		return Color3.fromRGB(150,150,150)
+		if method == "InvokeServer" then return C.amber end
+		if method == "FireServer" then return C.blue end
+		return C.dim
 	end
+
 	local function quoted(value)
 		return string.format("%q",value)
 	end
@@ -15391,10 +15458,13 @@ local function main()
 		if not blockButton then return end
 
 		local blocked = selectedLog and selectedLog.remote and state.blocked[selectedLog.remote]
+		local ignored = selectedLog and selectedLog.ignored
 
 		blockButton.Gui.Text = blocked and "Unblock" or "Block"
-		ignoreButton.Gui.Text = (selectedLog and selectedLog.ignored) and "Unignore" or "Ignore"
-		blockButton.Gui.TextColor3 = blocked and Color3.fromRGB(235,140,140) or Settings.Theme.Text
+		blockButton.Gui.TextColor3 = blocked and C.red or C.text
+
+		ignoreButton.Gui.Text = ignored and "Unignore" or "Ignore"
+		ignoreButton.Gui.TextColor3 = ignored and C.amber or C.text
 	end
 
 	local function showCall()
@@ -15402,19 +15472,20 @@ local function main()
 
 		if not selectedLog then
 			detailTitle.Gui.Text = "No remote selected"
-			detailTitle.Gui.TextColor3 = Color3.fromRGB(160,160,160)
-			detailPath.Gui.Text = "Pick a remote on the left to see its calls"
+			detailTitle.Gui.TextColor3 = C.muted
+			detailPath.Gui.Text = "Pick a remote on the left"
 			callerLabel.Gui.Text = ""
-			callLabel.Gui.Text = "no calls"
+			callLabel.Gui.Text = ""
 			argsBox.Text = ""
-			argsBox.PlaceholderText = "arguments appear here once a call is picked"
+			argsBox.PlaceholderText = "Arguments show up here as source you can edit before firing."
 			prevButton:SetDisabled(true)
 			nextButton:SetDisabled(true)
 			return
 		end
 
-		detailTitle.Gui.TextColor3 = Settings.Theme.Text
-		argsBox.PlaceholderText = "arguments, as source: 123, \"hello\", {a = 1}"
+		detailTitle.Gui.TextColor3 = C.text
+		detailTitle.Gui.Text = selectedLog.name
+		argsBox.PlaceholderText = "Arguments as source, for example 123, \"hello\", {a = 1}"
 
 		local calls = selectedLog.calls
 
@@ -15426,25 +15497,19 @@ local function main()
 			callIndex = 1
 		end
 
-		detailTitle.Gui.Text = selectedLog.name
-
-		local meta = ("%s  ·  %s  ·  %d calls"):format(selectedLog.className,selectedLog.method,selectedLog.count)
-		if selectedLog.ignored then meta = meta .. "  ·  ignored" end
+		local meta = ("%s  ·  %s"):format(selectedLog.className,selectedLog.method)
 		if state.blocked[selectedLog.remote] then meta = meta .. "  ·  blocked" end
+		if selectedLog.ignored then meta = meta .. "  ·  ignoring" end
 		detailPath.Gui.Text = meta
 
 		local call = calls[callIndex]
 
-		if call and call.caller then
-			callerLabel.Gui.Text = "from " .. tostring(call.caller)
+		if call then
+			callerLabel.Gui.Text = call.caller and ("from " .. tostring(call.caller)) or "from an unknown script"
+			callLabel.Gui.Text = ("%d / %d    %s"):format(callIndex,#calls,tostring(call.time))
 		else
-			callerLabel.Gui.Text = ""
-		end
-
-		if #calls == 0 then
-			callLabel.Gui.Text = "no calls yet"
-		elseif call then
-			callLabel.Gui.Text = ("%d of %d  ·  %s"):format(callIndex,#calls,tostring(call.time))
+			callerLabel.Gui.Text = "Nothing logged here yet"
+			callLabel.Gui.Text = ""
 		end
 
 		argsBox.Text = call and call.text or ""
@@ -15457,54 +15522,59 @@ local function main()
 		local selected = (log == selectedLog)
 		local blocked = state.blocked[log.remote]
 
-		local row = createSimple("TextButton",{
-			AutoButtonColor = false,
-			BackgroundColor3 = selected and Settings.Theme.ListSelection or Settings.Theme.ButtonHover,
-			BackgroundTransparency = selected and 0.25 or 1,
-			BorderSizePixel = 0,
-			Name = "Row",
-			Size = UDim2.new(1,-4,0,28),
-			Text = ""
-		})
+		local row = Instance.new("TextButton")
+		row.AutoButtonColor = false
+		row.BackgroundColor3 = selected and C.chosen or C.card
+		row.BorderSizePixel = 0
+		row.Name = "Row"
+		row.Size = UDim2.new(1,-8,0,36)
+		row.Text = ""
 		row.Parent = listFrame
 
-		local accent = createSimple("Frame",{
-			BackgroundColor3 = methodColor(log.method),
-			BackgroundTransparency = log.ignored and 0.6 or 0,
-			BorderSizePixel = 0,
-			Name = "Accent",
-			Position = UDim2.new(0,0,0,7),
-			Size = UDim2.new(0,3,0,14)
-		})
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0,6)
+		corner.Parent = row
+
+		local accent = Instance.new("Frame")
+		accent.BackgroundColor3 = blocked and C.red or (log.ignored and C.dim or methodColor(log.method))
+		accent.BackgroundTransparency = log.ignored and 0.5 or 0
+		accent.BorderSizePixel = 0
+		accent.Name = "Accent"
+		accent.Position = UDim2.new(0,0,0,10)
+		accent.Size = UDim2.new(0,3,0,16)
 		accent.Parent = row
+
+		local accentCorner = Instance.new("UICorner")
+		accentCorner.CornerRadius = UDim.new(0,2)
+		accentCorner.Parent = accent
 
 		local name = Lib.Label.new()
 		name.Gui.Parent = row
-		name.Gui.Position = UDim2.new(0,10,0,2)
-		name.Gui.Size = UDim2.new(1,-18,0,15)
+		name.Gui.Font = Enum.Font.Gotham
+		name.Gui.Position = UDim2.new(0,12,0,10)
+		name.Gui.Size = UDim2.new(1,-58,0,16)
+		name.Gui.Text = log.name
+		name.Gui.TextColor3 = blocked and C.red or (log.ignored and C.dim or C.text)
 		name.Gui.TextSize = 13
 		name.Gui.TextTruncate = Enum.TextTruncate.AtEnd
-		name.Gui.Text = log.name
-		if log.ignored then name.Gui.TextColor3 = Color3.fromRGB(130,130,130) end
 
-		local meta = Lib.Label.new()
-		meta.Gui.Parent = row
-		meta.Gui.Position = UDim2.new(0,10,0,16)
-		meta.Gui.Size = UDim2.new(1,-18,0,12)
-		meta.Gui.TextSize = 10
-		meta.Gui.TextTruncate = Enum.TextTruncate.AtEnd
-		meta.Gui.Text = ("%s  ·  %d calls"):format(log.method,log.count)
-			.. (blocked and "  ·  blocked" or "")
-			.. (log.ignored and "  ·  ignored" or "")
-		meta.Gui.TextColor3 = blocked and Color3.fromRGB(225,130,130)
-			or (log.ignored and Color3.fromRGB(120,120,120) or Color3.fromRGB(148,148,148))
+		local count = Lib.Label.new()
+		count.Gui.Parent = row
+		count.Gui.AnchorPoint = Vector2.new(1,0)
+		count.Gui.Font = Enum.Font.Gotham
+		count.Gui.Position = UDim2.new(1,-10,0,10)
+		count.Gui.Size = UDim2.new(0,44,0,16)
+		count.Gui.Text = ("x%d"):format(log.count)
+		count.Gui.TextColor3 = log.count > 0 and C.muted or C.dim
+		count.Gui.TextSize = 11
+		count.Gui.TextXAlignment = Enum.TextXAlignment.Right
 
 		row.MouseEnter:Connect(function()
-			if log ~= selectedLog then row.BackgroundTransparency = 0.6 end
+			if log ~= selectedLog then row.BackgroundColor3 = C.hover end
 		end)
 
 		row.MouseLeave:Connect(function()
-			if log ~= selectedLog then row.BackgroundTransparency = 1 end
+			if log ~= selectedLog then row.BackgroundColor3 = C.card end
 		end)
 
 		row.MouseButton1Click:Connect(function()
@@ -15512,6 +15582,17 @@ local function main()
 		end)
 
 		return row
+	end
+
+	local function paintTabs()
+		if not tabButtons then return end
+
+		for method,tab in pairs(tabButtons) do
+			local active = (method == activeMethod)
+			tab.Gui.BackgroundTransparency = active and 0 or 1
+			tab.Gui.BackgroundColor3 = tab.Fill
+			tab.Gui.TextColor3 = active and C.text or C.dim
+		end
 	end
 
 	local function rebuild()
@@ -15525,7 +15606,7 @@ local function main()
 		for i = 1,#listed do
 			local log = listed[i]
 
-			if matches(log,needle) then
+			if log.method == activeMethod and matches(log,needle) then
 				shown = shown + 1
 				firstVisible = firstVisible or log
 				if shown > MAX_SHOWN then break end
@@ -15536,18 +15617,27 @@ local function main()
 		if emptyLabel then
 			emptyLabel.Gui.Visible = (shown == 0)
 
-			if shown > 0 then
-				-- nothing else to show
-			elseif #state.logs > 0 then
-				emptyLabel.Gui.Text = ("No remotes match \"%s\".\nClear the filter to see all %d again."):format(filterText,#state.logs)
-			else
-				emptyLabel.Gui.Text = "Waiting for remote calls.\nThey show up here as the game fires them."
+			if shown == 0 then
+				if #state.logs == 0 then
+					emptyLabel.Gui.Text = "Waiting for the game to fire a remote.\nCalls appear here as they happen."
+				elseif filterText ~= "" then
+					emptyLabel.Gui.Text = ("Nothing matches \"%s\"."):format(filterText)
+				elseif activeMethod == "InvokeServer" then
+					emptyLabel.Gui.Text = "No remote functions called yet."
+				else
+					emptyLabel.Gui.Text = "No outgoing events in this session yet."
+				end
 			end
 		end
 
 		updateCount(shown)
+		paintTabs()
 
-		-- nothing picked yet, follow the first visible remote so the pane is not empty
+		-- the picked remote belongs to the other tab, so follow this one instead
+		if selectedLog and selectedLog.method ~= activeMethod then
+			selectedLog = nil
+		end
+
 		if not selectedLog and firstVisible then
 			selectedLog = firstVisible
 			callIndex = 1
@@ -15714,103 +15804,134 @@ local function main()
 	RemoteSpy.Init = function()
 		window = Lib.Window.new()
 		window:SetTitle("Remote Spy")
-		window:Resize(600,470)
+		window:Resize(640,460)
 		RemoteSpy.Window = window
 
 		local content = window.GuiElems.Content
+		content.BackgroundColor3 = C.body
 
-		-- search on the left, sort order on the right
+		pcall(function()
+			window.GuiElems.TopBar.BackgroundColor3 = Color3.fromRGB(24,24,24)
+		end)
+
+		-- header: one tab per kind of call on the left, search on the right
+		local header = createSimple("Frame",{
+			BackgroundColor3 = C.panel,
+			BorderSizePixel = 0,
+			Name = "Header",
+			Size = UDim2.new(1,0,0,36)
+		})
+		header.Parent = content
+
+		local headerLine = createSimple("Frame",{
+			BackgroundColor3 = C.line,
+			BorderSizePixel = 0,
+			Name = "Line",
+			Position = UDim2.new(0,0,1,-1),
+			Size = UDim2.new(1,0,0,1)
+		})
+		headerLine.Parent = header
+
+		tabButtons = {}
+
+		local function addTab(method,text,x)
+			local tab = makeButton(text,C.chosen,C.dim,function()
+				if activeMethod == method then return end
+
+				activeMethod = method
+				selectedLog = nil
+				callIndex = 1
+				rebuild()
+				syncDetail()
+				showCall()
+			end)
+
+			tab.Gui.Parent = header
+			tab.Gui.Position = UDim2.new(0,x,0,6)
+			tab.Gui.Size = UDim2.new(0,88,0,24)
+			tabButtons[method] = tab
+		end
+
+		addTab("FireServer","Outgoing",8)
+		addTab("InvokeServer","Invokes",102)
+
 		filterBox = Lib.ViewportTextBox.new()
-		filterBox.Gui.Parent = content
-		filterBox.Position = UDim2.new(0,4,0,4)
-		filterBox.Size = UDim2.new(1,-136,0,20)
+		filterBox.Gui.Parent = header
+		filterBox.Gui.AnchorPoint = Vector2.new(1,0)
+		filterBox.Gui.BackgroundColor3 = C.card
+		filterBox.Gui.BorderSizePixel = 0
+		filterBox.Gui.Position = UDim2.new(1,-8,0,6)
+		filterBox.Gui.Size = UDim2.new(0,196,0,24)
+		filterBox.TextBox.Font = Enum.Font.Gotham
+		filterBox.TextBox.PlaceholderText = "Search remotes"
+		filterBox.TextBox.PlaceholderColor3 = C.dim
+		filterBox.TextBox.TextColor3 = C.text
 		filterBox.TextBox.TextSize = 13
-		filterBox.TextBox.PlaceholderText = "filter by name, method or class"
+
+		local filterCorner = Instance.new("UICorner")
+		filterCorner.CornerRadius = UDim.new(0,5)
+		filterCorner.Parent = filterBox.Gui
 
 		local filterPadding = Instance.new("UIPadding")
+		filterPadding.PaddingLeft = UDim.new(0,8)
+		filterPadding.PaddingRight = UDim.new(0,6)
 		filterPadding.Parent = filterBox.Gui
-		filterPadding.PaddingLeft = UDim.new(0,5)
 
 		filterBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
 			filterText = filterBox:GetText()
 			rebuild()
 		end)
 
+		-- left is the remote list, right is the picked remote and its arguments
+		local divider = createSimple("Frame",{
+			BackgroundColor3 = C.line,
+			BorderSizePixel = 0,
+			Name = "Divider",
+			Position = UDim2.new(0,252,0,36),
+			Size = UDim2.new(0,1,1,-36)
+		})
+		divider.Parent = content
+
+		local listHeader = Lib.Label.new()
+		listHeader.Gui.Parent = content
+		listHeader.Gui.Font = Enum.Font.Gotham
+		listHeader.Gui.Position = UDim2.new(0,10,0,46)
+		listHeader.Gui.Size = UDim2.new(0,110,0,14)
+		listHeader.Gui.Text = "REMOTES"
+		listHeader.Gui.TextColor3 = C.dim
+		listHeader.Gui.TextSize = 11
+
+		countLabel = Lib.Label.new()
+		countLabel.Gui.Parent = content
+		countLabel.Gui.Font = Enum.Font.Gotham
+		countLabel.Gui.Position = UDim2.new(0,76,0,46)
+		countLabel.Gui.Size = UDim2.new(0,44,0,14)
+		countLabel.Gui.Text = "0"
+		countLabel.Gui.TextColor3 = C.muted
+		countLabel.Gui.TextSize = 11
+
 		sortDrop = Lib.DropDown.new()
 		sortDrop.CanBeEmpty = false
 		sortDrop.Gui.Parent = content
 		sortDrop.Gui.AnchorPoint = Vector2.new(1,0)
-		sortDrop.Gui.Position = UDim2.new(1,-4,0,4)
-		sortDrop.Gui.Size = UDim2.new(0,124,0,20)
-		sortDrop.GuiElems.Label.Gui.TextSize = 13
+		sortDrop.Gui.BackgroundColor3 = C.card
+		sortDrop.Gui.BorderSizePixel = 0
+		sortDrop.Gui.Position = UDim2.new(0,246,0,44)
+		sortDrop.Gui.Size = UDim2.new(0,96,0,18)
+		sortDrop.GuiElems.Label.Gui.Font = Enum.Font.Gotham
+		sortDrop.GuiElems.Label.Gui.Position = UDim2.new(0,8,0,0)
+		sortDrop.GuiElems.Label.Gui.Size = UDim2.new(1,-26,1,0)
+		sortDrop.GuiElems.Label.Gui.TextColor3 = C.muted
+		sortDrop.GuiElems.Label.Gui.TextSize = 11
 		sortDrop:SetOptions(SORT_MODES)
 		sortDrop.OnSelect:Connect(function(option)
 			sortMode = tostring(option or "Newest first")
 			rebuild()
 		end)
 
-		pauseButton = Lib.Button.new()
-		pauseButton.Gui.Parent = content
-		pauseButton.Gui.Position = UDim2.new(0,4,0,28)
-		pauseButton.Gui.Size = UDim2.new(0,60,0,20)
-		pauseButton.Gui.TextSize = 13
-		pauseButton.Gui.Text = "Pause"
-		pauseButton.OnClick:Connect(function()
-			paused = not paused
-			pauseButton.Gui.Text = paused and "Resume" or "Pause"
-			pauseButton.Gui.TextColor3 = paused and Color3.fromRGB(226,168,92) or Settings.Theme.Text
-			setStatus(paused and "Paused, calls still go through but are not logged" or "Logging remote calls again")
-		end)
-
-		spamButton = Lib.Button.new()
-		spamButton.Gui.Parent = content
-		spamButton.Gui.Position = UDim2.new(0,70,0,28)
-		spamButton.Gui.Size = UDim2.new(0,86,0,20)
-		spamButton.Gui.TextSize = 13
-		spamButton.Gui.Text = "Spam: off"
-		spamButton.OnClick:Connect(function()
-			state.autoIgnore = not state.autoIgnore
-			spamButton.Gui.Text = state.autoIgnore and "Spam: on" or "Spam: off"
-			spamButton.Gui.TextColor3 = state.autoIgnore and Color3.fromRGB(226,168,92) or Settings.Theme.Text
-			setStatus(state.autoIgnore and (("Auto ignoring remotes that fire more than %d times a second"):format(SPAM_CALLS)) or "Spam filter off, every call is logged")
-		end)
-
-		local clearButton = Lib.Button.new()
-		clearButton.Gui.Parent = content
-		clearButton.Gui.AnchorPoint = Vector2.new(1,0)
-		clearButton.Gui.Position = UDim2.new(1,-4,0,28)
-		clearButton.Gui.Size = UDim2.new(0,56,0,20)
-		clearButton.Gui.TextSize = 13
-		clearButton.Gui.Text = "Clear"
-		clearButton.OnClick:Connect(clearLog)
-
-		-- left panel: one row per remote and method
-		local listPanel = createSimple("Frame",{
-			BackgroundColor3 = Settings.Theme.Main2,
-			BorderColor3 = Settings.Theme.Outline1,
-			Name = "ListPanel",
-			Position = UDim2.new(0,4,0,52),
-			Size = UDim2.new(0,238,1,-84)
-		})
-		listPanel.Parent = content
-
-		local listHeader = Lib.Label.new()
-		listHeader.Gui.Parent = listPanel
-		listHeader.Gui.Position = UDim2.new(0,8,0,4)
-		listHeader.Gui.Size = UDim2.new(1,-16,0,16)
-		listHeader.Gui.TextSize = 11
-		listHeader.Gui.TextColor3 = Color3.fromRGB(148,148,148)
-		listHeader.Gui.Text = "REMOTE CALLS"
-
-		countLabel = Lib.Label.new()
-		countLabel.Gui.Parent = listPanel
-		countLabel.Gui.AnchorPoint = Vector2.new(1,0)
-		countLabel.Gui.Position = UDim2.new(1,-8,0,4)
-		countLabel.Gui.Size = UDim2.new(0,120,0,16)
-		countLabel.Gui.TextSize = 11
-		countLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
-		countLabel.Gui.TextColor3 = Color3.fromRGB(148,148,148)
-		countLabel.Gui.Text = "0 remotes"
+		local sortCorner = Instance.new("UICorner")
+		sortCorner.CornerRadius = UDim.new(0,5)
+		sortCorner.Parent = sortDrop.Gui
 
 		listFrame = createSimple("ScrollingFrame",{
 			AutomaticCanvasSize = Enum.AutomaticSize.Y,
@@ -15819,119 +15940,159 @@ local function main()
 			BottomImage = "",
 			CanvasSize = UDim2.new(0,0,0,0),
 			Name = "List",
-			Position = UDim2.new(0,4,0,24),
-			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
-			ScrollBarThickness = 6,
-			Size = UDim2.new(1,-8,1,-28),
+			Position = UDim2.new(0,6,0,64),
+			ScrollBarImageColor3 = C.line,
+			ScrollBarThickness = 4,
+			Size = UDim2.new(0,240,1,-104),
 			TopImage = ""
 		})
-		listFrame.Parent = listPanel
+		listFrame.Parent = content
 
 		local layout = Instance.new("UIListLayout")
 		layout.FillDirection = Enum.FillDirection.Vertical
-		layout.Padding = UDim.new(0,1)
+		layout.Padding = UDim.new(0,4)
 		layout.SortOrder = Enum.SortOrder.LayoutOrder
 		layout.Parent = listFrame
 
+		local listPadding = Instance.new("UIPadding")
+		listPadding.PaddingRight = UDim.new(0,4)
+		listPadding.Parent = listFrame
+
 		emptyLabel = Lib.Label.new()
-		emptyLabel.Gui.Parent = listPanel
+		emptyLabel.Gui.Parent = content
 		emptyLabel.Gui.AnchorPoint = Vector2.new(0.5,0.5)
-		emptyLabel.Gui.Position = UDim2.new(0.5,0,0.5,8)
-		emptyLabel.Gui.Size = UDim2.new(1,-24,0,44)
+		emptyLabel.Gui.Font = Enum.Font.Gotham
+		emptyLabel.Gui.Position = UDim2.new(0,126,0.5,10)
+		emptyLabel.Gui.Size = UDim2.new(0,206,0,44)
+		emptyLabel.Gui.Text = "Waiting for the game to fire a remote.\nCalls appear here as they happen."
+		emptyLabel.Gui.TextColor3 = C.dim
 		emptyLabel.Gui.TextSize = 12
-		emptyLabel.Gui.TextColor3 = Color3.fromRGB(130,130,130)
+		emptyLabel.Gui.TextWrapped = true
 		emptyLabel.Gui.TextXAlignment = Enum.TextXAlignment.Center
 		emptyLabel.Gui.TextYAlignment = Enum.TextYAlignment.Center
-		emptyLabel.Gui.TextWrapped = true
-		emptyLabel.Gui.Text = "Waiting for remote calls.\nThey show up here as the game fires them."
 
-		-- right panel: the selected remote, its calls and the argument editor
-		local detailPanel = createSimple("Frame",{
-			BackgroundColor3 = Settings.Theme.Main2,
-			BorderColor3 = Settings.Theme.Outline1,
-			Name = "DetailPanel",
-			Position = UDim2.new(0,246,0,52),
-			Size = UDim2.new(1,-250,1,-84)
+		local toolbar = createSimple("Frame",{
+			BackgroundTransparency = 1,
+			Name = "Tools",
+			Position = UDim2.new(0,6,1,-34),
+			Size = UDim2.new(0,240,0,24)
 		})
-		detailPanel.Parent = content
+		toolbar.Parent = content
+
+		pauseButton = makeButton("Pause",C.card,C.text,function()
+			paused = not paused
+			pauseButton.Gui.Text = paused and "Resume" or "Pause"
+			pauseButton.Gui.TextColor3 = paused and C.amber or C.text
+			pauseButton.Fill = paused and C.warn or C.card
+			pauseButton.Gui.BackgroundColor3 = pauseButton.Fill
+			setStatus(paused and "Paused. Calls still fire, they are just not logged." or "Logging remote calls again")
+		end)
+		pauseButton.Gui.Parent = toolbar
+		pauseButton.Gui.Size = UDim2.new(0,68,0,24)
+
+		spamButton = makeButton("Spam: off",C.card,C.muted,function()
+			state.autoIgnore = not state.autoIgnore
+			spamButton.Gui.Text = state.autoIgnore and "Spam: on" or "Spam: off"
+			spamButton.Gui.TextColor3 = state.autoIgnore and C.amber or C.muted
+			spamButton.Fill = state.autoIgnore and C.warn or C.card
+			spamButton.Gui.BackgroundColor3 = spamButton.Fill
+			setStatus(state.autoIgnore and (("Ignoring remotes that fire more than %d times a second"):format(SPAM_CALLS)) or "Spam filter off, every call gets logged")
+		end)
+		spamButton.Gui.Parent = toolbar
+		spamButton.Gui.Position = UDim2.new(0,74,0,0)
+		spamButton.Gui.Size = UDim2.new(0,90,0,24)
+
+		local clearButton = makeButton("Clear",C.card,C.muted,clearLog)
+		clearButton.Gui.Parent = toolbar
+		clearButton.Gui.AnchorPoint = Vector2.new(1,0)
+		clearButton.Gui.Position = UDim2.new(1,0,0,0)
+		clearButton.Gui.Size = UDim2.new(0,60,0,24)
 
 		detailTitle = Lib.Label.new()
-		detailTitle.Gui.Parent = detailPanel
-		detailTitle.Gui.Position = UDim2.new(0,8,0,6)
-		detailTitle.Gui.Size = UDim2.new(1,-16,0,18)
-		detailTitle.Gui.TextSize = 14
-		detailTitle.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		detailTitle.Gui.Parent = content
+		detailTitle.Gui.Font = Enum.Font.GothamBold
+		detailTitle.Gui.Position = UDim2.new(0,264,0,44)
+		detailTitle.Gui.Size = UDim2.new(1,-272,0,20)
 		detailTitle.Gui.Text = "No remote selected"
+		detailTitle.Gui.TextColor3 = C.muted
+		detailTitle.Gui.TextSize = 15
+		detailTitle.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 
 		detailPath = Lib.Label.new()
-		detailPath.Gui.Parent = detailPanel
-		detailPath.Gui.Position = UDim2.new(0,8,0,24)
-		detailPath.Gui.Size = UDim2.new(1,-16,0,14)
+		detailPath.Gui.Parent = content
+		detailPath.Gui.Font = Enum.Font.Gotham
+		detailPath.Gui.Position = UDim2.new(0,264,0,64)
+		detailPath.Gui.Size = UDim2.new(1,-272,0,14)
+		detailPath.Gui.Text = "Pick a remote on the left"
+		detailPath.Gui.TextColor3 = C.muted
 		detailPath.Gui.TextSize = 11
-		detailPath.Gui.TextColor3 = Color3.fromRGB(150,150,150)
 		detailPath.Gui.TextTruncate = Enum.TextTruncate.AtEnd
-		detailPath.Gui.Text = "Pick a remote on the left to see its calls"
 
 		callerLabel = Lib.Label.new()
-		callerLabel.Gui.Parent = detailPanel
-		callerLabel.Gui.Position = UDim2.new(0,8,0,38)
-		callerLabel.Gui.Size = UDim2.new(1,-16,0,14)
+		callerLabel.Gui.Parent = content
 		callerLabel.Gui.Font = Enum.Font.Code
-		callerLabel.Gui.TextSize = 10
-		callerLabel.Gui.TextColor3 = Color3.fromRGB(120,120,120)
-		callerLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		callerLabel.Gui.Position = UDim2.new(0,264,0,80)
+		callerLabel.Gui.Size = UDim2.new(1,-272,0,14)
 		callerLabel.Gui.Text = ""
+		callerLabel.Gui.TextColor3 = C.dim
+		callerLabel.Gui.TextSize = 10
+		callerLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 
-		prevButton = Lib.Button.new()
-		prevButton.Gui.Parent = detailPanel
-		prevButton.Gui.Position = UDim2.new(0,8,0,56)
-		prevButton.Gui.Size = UDim2.new(0,62,0,20)
-		prevButton.Gui.TextSize = 12
-		prevButton.Gui.Text = "< Older"
-		prevButton.OnClick:Connect(function()
+		prevButton = makeButton("< Older",C.card,C.text,function()
 			callIndex = callIndex + 1
 			showCall()
 		end)
+		prevButton.Gui.Parent = content
+		prevButton.Gui.Position = UDim2.new(0,264,0,100)
+		prevButton.Gui.Size = UDim2.new(0,58,0,20)
+		prevButton.Gui.TextSize = 11
 
-		callLabel = Lib.Label.new()
-		callLabel.Gui.Parent = detailPanel
-		callLabel.Gui.Position = UDim2.new(0,72,0,56)
-		callLabel.Gui.Size = UDim2.new(1,-144,0,20)
-		callLabel.Gui.TextSize = 11
-		callLabel.Gui.TextColor3 = Color3.fromRGB(150,150,150)
-		callLabel.Gui.TextXAlignment = Enum.TextXAlignment.Center
-		callLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
-		callLabel.Gui.Text = "no calls"
-
-		nextButton = Lib.Button.new()
-		nextButton.Gui.Parent = detailPanel
-		nextButton.Gui.AnchorPoint = Vector2.new(1,0)
-		nextButton.Gui.Position = UDim2.new(1,-8,0,56)
-		nextButton.Gui.Size = UDim2.new(0,62,0,20)
-		nextButton.Gui.TextSize = 12
-		nextButton.Gui.Text = "Newer >"
-		nextButton.OnClick:Connect(function()
+		nextButton = makeButton("Newer >",C.card,C.text,function()
 			callIndex = callIndex - 1
 			showCall()
 		end)
+		nextButton.Gui.Parent = content
+		nextButton.Gui.AnchorPoint = Vector2.new(1,0)
+		nextButton.Gui.Position = UDim2.new(1,-8,0,100)
+		nextButton.Gui.Size = UDim2.new(0,58,0,20)
+		nextButton.Gui.TextSize = 11
 
-		local editorFrame = createSimple("Frame",{
-			BackgroundColor3 = Settings.Theme.TextBox,
-			BorderColor3 = Settings.Theme.Outline3,
+		callLabel = Lib.Label.new()
+		callLabel.Gui.Parent = content
+		callLabel.Gui.Font = Enum.Font.Gotham
+		callLabel.Gui.Position = UDim2.new(0,326,0,100)
+		callLabel.Gui.Size = UDim2.new(1,-336,0,20)
+		callLabel.Gui.Text = ""
+		callLabel.Gui.TextColor3 = C.muted
+		callLabel.Gui.TextSize = 11
+		callLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		callLabel.Gui.TextXAlignment = Enum.TextXAlignment.Center
+
+		local editor = createSimple("Frame",{
+			BackgroundColor3 = C.card,
 			BorderSizePixel = 0,
 			ClipsDescendants = true,
 			Name = "Arguments",
-			Position = UDim2.new(0,8,0,80),
-			Size = UDim2.new(1,-16,1,-118)
+			Position = UDim2.new(0,264,0,128),
+			Size = UDim2.new(1,-272,1,-192)
 		})
-		editorFrame.Parent = detailPanel
+		editor.Parent = content
+
+		local editorCorner = Instance.new("UICorner")
+		editorCorner.CornerRadius = UDim.new(0,6)
+		editorCorner.Parent = editor
+
+		local editorStroke = Instance.new("UIStroke")
+		editorStroke.Color = C.line
+		editorStroke.Thickness = 1
+		editorStroke.Parent = editor
 
 		local editorPadding = Instance.new("UIPadding")
-		editorPadding.PaddingTop = UDim.new(0,4)
-		editorPadding.PaddingBottom = UDim.new(0,4)
-		editorPadding.PaddingLeft = UDim.new(0,6)
-		editorPadding.PaddingRight = UDim.new(0,4)
-		editorPadding.Parent = editorFrame
+		editorPadding.PaddingBottom = UDim.new(0,6)
+		editorPadding.PaddingLeft = UDim.new(0,9)
+		editorPadding.PaddingRight = UDim.new(0,6)
+		editorPadding.PaddingTop = UDim.new(0,6)
+		editorPadding.Parent = editor
 
 		argsBox = Instance.new("TextBox")
 		argsBox.BackgroundTransparency = 1
@@ -15939,54 +16100,52 @@ local function main()
 		argsBox.Font = Enum.Font.Code
 		argsBox.MultiLine = true
 		argsBox.Name = "Args"
-		argsBox.PlaceholderText = "arguments, as source: 123, \"hello\", {a = 1}"
+		argsBox.PlaceholderColor3 = C.dim
+		argsBox.PlaceholderText = "Arguments as source, for example 123, \"hello\", {a = 1}"
 		argsBox.Size = UDim2.new(1,0,1,0)
 		argsBox.Text = ""
-		argsBox.TextColor3 = Settings.Theme.Text
+		argsBox.TextColor3 = Color3.fromRGB(220,220,220)
 		argsBox.TextSize = 12
 		argsBox.TextWrapped = true
 		argsBox.TextXAlignment = Enum.TextXAlignment.Left
 		argsBox.TextYAlignment = Enum.TextYAlignment.Top
-		argsBox.Parent = editorFrame
+		argsBox.Parent = editor
 
 		local actionRow = createSimple("Frame",{
 			BackgroundTransparency = 1,
 			Name = "Actions",
-			Position = UDim2.new(0,8,1,-30),
-			Size = UDim2.new(1,-16,0,22)
+			Position = UDim2.new(0,264,1,-58),
+			Size = UDim2.new(1,-272,0,24)
 		})
-		actionRow.Parent = detailPanel
+		actionRow.Parent = content
 
 		local actionLayout = Instance.new("UIListLayout")
 		actionLayout.FillDirection = Enum.FillDirection.Horizontal
-		actionLayout.Padding = UDim.new(0,4)
+		actionLayout.Padding = UDim.new(0,5)
 		actionLayout.SortOrder = Enum.SortOrder.LayoutOrder
 		actionLayout.Parent = actionRow
 
-		local function actionButton(text,onClick)
-			local button = Lib.Button.new()
+		local function actionButton(text,primary,onClick)
+			local button = makeButton(text,primary and C.blue or C.card,C.text,onClick)
 			button.Gui.Parent = actionRow
 			button.Gui.Size = UDim2.new(0.25,-4,1,0)
-			button.Gui.TextSize = 13
-			button.Gui.Text = text
-			button.OnClick:Connect(onClick)
 			return button
 		end
 
-		actionButton("Fire",fireSelected)
-		blockButton = actionButton("Block",toggleBlock)
-		ignoreButton = actionButton("Ignore",toggleIgnore)
-		actionButton("Copy",copySelected)
+		actionButton("Fire",true,fireSelected)
+		blockButton = actionButton("Block",false,toggleBlock)
+		ignoreButton = actionButton("Ignore",false,toggleIgnore)
+		actionButton("Copy",false,copySelected)
 
 		statusLabel = Lib.Label.new()
 		statusLabel.Gui.Parent = content
-		statusLabel.Gui.AnchorPoint = Vector2.new(0,1)
-		statusLabel.Gui.Position = UDim2.new(0,4,1,-4)
-		statusLabel.Gui.Size = UDim2.new(1,-8,0,18)
-		statusLabel.Gui.TextSize = 12
-		statusLabel.Gui.TextColor3 = Color3.fromRGB(150,150,150)
-		statusLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		statusLabel.Gui.Font = Enum.Font.Gotham
+		statusLabel.Gui.Position = UDim2.new(0,264,1,-26)
+		statusLabel.Gui.Size = UDim2.new(1,-272,0,14)
 		statusLabel.Gui.Text = "Listening for remote calls"
+		statusLabel.Gui.TextColor3 = C.dim
+		statusLabel.Gui.TextSize = 11
+		statusLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 
 		local hooked,hookErr = installHook()
 		if not hooked then
