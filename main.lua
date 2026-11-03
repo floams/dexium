@@ -956,26 +956,20 @@ local function main()
 		if Explorer.FilterStroke then
 			Explorer.FilterStroke.Color = active and Explorer.AccentColor or Color3.fromRGB(58,58,58)
 		end
-		local rows = Explorer.FilterRows
-		if rows then
-			for i = 1,#rows do
-				local row = rows[i]
-				-- "All" is the active row exactly when no group is applied
-				local isActive = row.IsAll and (Explorer.FilterGroup == nil) or (row.Group ~= nil and row.Group == Explorer.FilterGroup)
-				row.Active = isActive
-				row.Button.Text = row.Name
-				row.Button.TextColor3 = isActive and Settings.Theme.Text or Color3.fromRGB(200,200,200)
-				row.Button.BackgroundTransparency = isActive and 0 or 1
-			end
-		end
 	end
 
 	Explorer.ToggleFilterMenu = function(state)
 		local menu = Explorer.FilterMenu
 		if not menu then return end
-		if state == nil then state = not menu.Visible end
-		menu.Visible = state
-		if state then Explorer.RefreshFilterMenu() end
+
+		local open = menu.Gui.Parent ~= nil
+		if state == nil then state = not open end
+
+		if state then
+			if not open then Explorer.OpenFilterMenu() end
+		elseif open then
+			menu:Hide()
+		end
 	end
 
 	Explorer.SetFilter = function(group)
@@ -3903,75 +3897,45 @@ return search]==]
 		Explorer.FilterGlyphs = {filterButton.Glyph1,filterButton.Glyph2,filterButton.Glyph3}
 		Explorer.FilterStroke = filterButton:FindFirstChild("UIStroke")
 
-		local filterRows = {{Name = "All"}}
+		-- alphabetical, so the list reads like Dex's other menus and every new
+		-- filter lands where its name says it should
+		local filterGroups = {}
 		for i = 1,#Explorer.Filters do
-			filterRows[#filterRows+1] = Explorer.Filters[i]
+			filterGroups[#filterGroups+1] = Explorer.Filters[i]
 		end
+		table.sort(filterGroups,function(a,b) return a.Name < b.Name end)
 
-		-- width fits the longest label so nothing truncates, and the menu hangs under the button
-		local menuRowH,menuPad = 24,4
-		local menuWidth = 0
-		for i = 1,#filterRows do
-			local textW = service.TextService:GetTextSize(filterRows[i].Name,13,Enum.Font.SourceSans,Vector2.new(1000,1000)).X
-			if textW > menuWidth then menuWidth = textW end
-		end
-		menuWidth = math.max(148,math.floor(menuWidth + 18))
+		-- Dex's own menu component, the one behind the explorer's right click menu,
+		-- so the dropdown matches the rest of the interface exactly
+		local filterContext = Lib.ContextMenu.new()
+		filterContext.Iconless = true
+		filterContext.Width = 170
+		filterContext.MaxHeight = 320
+		filterContext.ReverseYOffset = math.max(22,filterButton.AbsoluteSize.Y)
+		Explorer.FilterMenu = filterContext
 
-		Explorer.FilterMenu = create({
-			{1,"Frame",{BackgroundColor3=Settings.Theme.Menu,BorderSizePixel=0,Name="FilterMenu",Parent=window.GuiElems.Content,Position=UDim2.new(1,-6-menuWidth,0,tbH+2),Size=UDim2.new(0,menuWidth,0,#filterRows*menuRowH+menuPad*2+4),Visible=false,ZIndex=50}},
-			{2,"UICorner",{CornerRadius=UDim.new(0,4),Parent={1},}},
-			{3,"UIStroke",{Thickness=1,Parent={1},Color=Settings.Theme.Outline2}},
-			{4,"Frame",{BackgroundTransparency=1,Name="Holder",Parent={1},Size=UDim2.new(1,0,1,0),ZIndex=50,}},
-			{5,"UIListLayout",{Parent={4},Padding=UDim.new(0,1),SortOrder=Enum.SortOrder.LayoutOrder,}},
-			{6,"UIPadding",{Parent={4},PaddingTop=UDim.new(0,menuPad),PaddingBottom=UDim.new(0,menuPad),PaddingLeft=UDim.new(0,menuPad),PaddingRight=UDim.new(0,menuPad),}},
-		})
-
-		local filterHolder = Explorer.FilterMenu.Holder
-		Explorer.FilterRows = {}
-
-		for i = 1,#filterRows do
-			local item = filterRows[i]
-			local row = createSimple("TextButton",{
-				AutoButtonColor = false,
-				BackgroundColor3 = Settings.Theme.ListSelection,
-				BackgroundTransparency = 1,
-				BorderSizePixel = 0,
-				Font = Enum.Font.SourceSans,
-				LayoutOrder = i,
-				Name = "Row"..i,
-				Parent = filterHolder,
-				Size = UDim2.new(1,0,0,menuRowH),
-				Text = item.Name,
-				TextColor3 = Color3.fromRGB(200,200,200),
-				TextSize = 13,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				ZIndex = 51
+		-- rebuilt on open so the marker always follows the active filter
+		Explorer.OpenFilterMenu = function()
+			filterContext:Clear()
+			filterContext:Add({
+				Name = "All",
+				Shortcut = (Explorer.FilterGroup == nil) and "•" or "",
+				OnClick = function() Explorer.SetFilter(nil) end
 			})
 
-			createSimple("UICorner",{Parent = row,CornerRadius = UDim.new(0,4)})
-			createSimple("UIPadding",{Parent = row,PaddingLeft = UDim.new(0,8)})
+			for i = 1,#filterGroups do
+				local group = filterGroups[i]
+				filterContext:Add({
+					Name = group.Name,
+					Shortcut = (Explorer.FilterGroup == group) and "•" or "",
+					OnClick = function() Explorer.SetFilter(group) end
+				})
+			end
 
-			row.InputBegan:Connect(function(input)
-				if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-				local info = Explorer.FilterRows[i]
-				if info and info.Active then return end
-				row.BackgroundColor3 = Settings.Theme.ButtonHover
-				row.BackgroundTransparency = 0
-				row.TextColor3 = Settings.Theme.Text
-			end)
-			row.InputEnded:Connect(function(input)
-				if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-				local info = Explorer.FilterRows[i]
-				if info and info.Active then return end
-				row.BackgroundTransparency = 1
-				row.TextColor3 = Color3.fromRGB(200,200,200)
-			end)
-			row.MouseButton1Click:Connect(function()
-				Explorer.SetFilter(item.Test and item or nil)
-				Explorer.ToggleFilterMenu(false)
-			end)
-
-			Explorer.FilterRows[i] = {Button = row, Group = (item.Test and item or nil), Name = item.Name, IsAll = (item.Test == nil), Active = false}
+			filterContext:Show(
+				filterButton.AbsolutePosition.X + filterButton.AbsoluteSize.X - filterContext.Width,
+				filterButton.AbsolutePosition.Y + filterButton.AbsoluteSize.Y
+			)
 		end
 
 		filterButton.MouseButton1Click:Connect(function()
@@ -19216,7 +19180,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.35" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.36" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
