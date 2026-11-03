@@ -15060,13 +15060,15 @@ local function main()
 	local unpack,pack = table.unpack,table.pack
 
 	local window, listFrame, statusLabel, filterBox, pauseButton, spamButton, countLabel
-	local detailTitle, detailPath, callLabel, argsBox
+	local detailTitle, detailPath, callerLabel, callLabel, argsBox
 	local prevButton, nextButton, blockButton, ignoreButton
+	local sortDrop, emptyLabel
 	local rows = {}
 	local selectedLog
 	local callIndex = 1
 	local paused = false
 	local filterText = ""
+	local sortMode = "Newest first"
 	local lastSeq = -1
 
 	local MAX_LOGS = 120 -- remotes remembered at once
@@ -15110,6 +15112,42 @@ local function main()
 		end
 	end
 
+	local SORT_MODES = {"Newest first","Most calls","Name A to Z"}
+
+	-- the log itself stays newest first, the other orders are worked out on demand
+	local function sortedLogs()
+		local list = {}
+		for i = 1,#state.logs do list[i] = state.logs[i] end
+
+		if sortMode == "Most calls" then
+			table.sort(list,function(a,b)
+				if a.count ~= b.count then return a.count > b.count end
+				return a.name:lower() < b.name:lower()
+			end)
+		elseif sortMode == "Name A to Z" then
+			table.sort(list,function(a,b)
+				local an,bn = a.name:lower(),b.name:lower()
+				if an ~= bn then return an < bn end
+				return a.method < b.method
+			end)
+		end
+
+		return list
+	end
+
+	local function matches(log,needle)
+		return needle == ""
+			or log.name:lower():find(needle,1,true)
+			or log.method:lower():find(needle,1,true)
+			or log.className:lower():find(needle,1,true)
+	end
+
+	-- one colour per method, so the left edge of a row reads at a glance
+	local function methodColor(method)
+		if method == "InvokeServer" then return Color3.fromRGB(226,168,92) end
+		if method == "FireServer" then return Color3.fromRGB(108,168,238) end
+		return Color3.fromRGB(150,150,150)
+	end
 	local function quoted(value)
 		return string.format("%q",value)
 	end
@@ -15356,6 +15394,7 @@ local function main()
 
 		blockButton.Gui.Text = blocked and "Unblock" or "Block"
 		ignoreButton.Gui.Text = (selectedLog and selectedLog.ignored) and "Unignore" or "Ignore"
+		blockButton.Gui.TextColor3 = blocked and Color3.fromRGB(235,140,140) or Settings.Theme.Text
 	end
 
 	local function showCall()
@@ -15363,13 +15402,19 @@ local function main()
 
 		if not selectedLog then
 			detailTitle.Gui.Text = "No remote selected"
-			detailPath.Gui.Text = ""
+			detailTitle.Gui.TextColor3 = Color3.fromRGB(160,160,160)
+			detailPath.Gui.Text = "Pick a remote on the left to see its calls"
+			callerLabel.Gui.Text = ""
 			callLabel.Gui.Text = "no calls"
 			argsBox.Text = ""
+			argsBox.PlaceholderText = "arguments appear here once a call is picked"
 			prevButton:SetDisabled(true)
 			nextButton:SetDisabled(true)
 			return
 		end
+
+		detailTitle.Gui.TextColor3 = Settings.Theme.Text
+		argsBox.PlaceholderText = "arguments, as source: 123, \"hello\", {a = 1}"
 
 		local calls = selectedLog.calls
 
@@ -15381,14 +15426,26 @@ local function main()
 			callIndex = 1
 		end
 
-		detailTitle.Gui.Text = ("%s  %s"):format(selectedLog.className,selectedLog.name)
+		detailTitle.Gui.Text = selectedLog.name
+
+		local meta = ("%s  ·  %s  ·  %d calls"):format(selectedLog.className,selectedLog.method,selectedLog.count)
+		if selectedLog.ignored then meta = meta .. "  ·  ignored" end
+		if state.blocked[selectedLog.remote] then meta = meta .. "  ·  blocked" end
+		detailPath.Gui.Text = meta
 
 		local call = calls[callIndex]
-		local path = logPath(selectedLog)
-		if call and call.caller then path = path .. "   from " .. call.caller end
-		detailPath.Gui.Text = path
 
-		callLabel.Gui.Text = (#calls == 0) and "no calls" or ("%s  %d of %d"):format(selectedLog.method,callIndex,#calls)
+		if call and call.caller then
+			callerLabel.Gui.Text = "from " .. tostring(call.caller)
+		else
+			callerLabel.Gui.Text = ""
+		end
+
+		if #calls == 0 then
+			callLabel.Gui.Text = "no calls yet"
+		elseif call then
+			callLabel.Gui.Text = ("%d of %d  ·  %s"):format(callIndex,#calls,tostring(call.time))
+		end
 
 		argsBox.Text = call and call.text or ""
 
@@ -15398,40 +15455,49 @@ local function main()
 
 	local function createRow(log)
 		local selected = (log == selectedLog)
+		local blocked = state.blocked[log.remote]
 
 		local row = createSimple("TextButton",{
 			AutoButtonColor = false,
-			BackgroundColor3 = Settings.Theme.Button,
-			BackgroundTransparency = selected and 0.7 or 1,
+			BackgroundColor3 = selected and Settings.Theme.ListSelection or Settings.Theme.ButtonHover,
+			BackgroundTransparency = selected and 0.25 or 1,
 			BorderSizePixel = 0,
 			Name = "Row",
-			Size = UDim2.new(1,-4,0,20),
+			Size = UDim2.new(1,-4,0,28),
 			Text = ""
 		})
 		row.Parent = listFrame
 
+		local accent = createSimple("Frame",{
+			BackgroundColor3 = methodColor(log.method),
+			BackgroundTransparency = log.ignored and 0.6 or 0,
+			BorderSizePixel = 0,
+			Name = "Accent",
+			Position = UDim2.new(0,0,0,7),
+			Size = UDim2.new(0,3,0,14)
+		})
+		accent.Parent = row
+
 		local name = Lib.Label.new()
 		name.Gui.Parent = row
-		name.Gui.Position = UDim2.new(0,4,0,0)
-		name.Gui.Size = UDim2.new(1,-96,1,0)
+		name.Gui.Position = UDim2.new(0,10,0,2)
+		name.Gui.Size = UDim2.new(1,-18,0,15)
 		name.Gui.TextSize = 13
 		name.Gui.TextTruncate = Enum.TextTruncate.AtEnd
-		name.Gui.Text = ("%s  (%s)"):format(log.name,log.method)
+		name.Gui.Text = log.name
+		if log.ignored then name.Gui.TextColor3 = Color3.fromRGB(130,130,130) end
 
-		if log.blocked then
-			name.Gui.TextColor3 = Color3.fromRGB(220,120,120)
-		elseif log.ignored then
-			name.Gui.TextColor3 = Color3.fromRGB(130,130,130)
-		end
-
-		local count = Lib.Label.new()
-		count.Gui.Parent = row
-		count.Gui.Position = UDim2.new(1,-90,0,0)
-		count.Gui.Size = UDim2.new(0,86,1,0)
-		count.Gui.TextSize = 12
-		count.Gui.TextXAlignment = Enum.TextXAlignment.Right
-		count.Gui.TextColor3 = Color3.fromRGB(140,140,140)
-		count.Gui.Text = log.blocked and ("%d  blocked"):format(log.count) or ("%d calls"):format(log.count)
+		local meta = Lib.Label.new()
+		meta.Gui.Parent = row
+		meta.Gui.Position = UDim2.new(0,10,0,16)
+		meta.Gui.Size = UDim2.new(1,-18,0,12)
+		meta.Gui.TextSize = 10
+		meta.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		meta.Gui.Text = ("%s  ·  %d calls"):format(log.method,log.count)
+			.. (blocked and "  ·  blocked" or "")
+			.. (log.ignored and "  ·  ignored" or "")
+		meta.Gui.TextColor3 = blocked and Color3.fromRGB(225,130,130)
+			or (log.ignored and Color3.fromRGB(120,120,120) or Color3.fromRGB(148,148,148))
 
 		row.MouseEnter:Connect(function()
 			if log ~= selectedLog then row.BackgroundTransparency = 0.6 end
@@ -15452,23 +15518,42 @@ local function main()
 		clearRows()
 
 		local needle = filterText:lower()
+		local listed = sortedLogs()
 		local shown = 0
+		local firstVisible
 
-		for i = 1,#state.logs do
-			local log = state.logs[i]
-			local hit = needle == ""
-				or log.name:lower():find(needle,1,true)
-				or log.method:lower():find(needle,1,true)
-				or log.className:lower():find(needle,1,true)
+		for i = 1,#listed do
+			local log = listed[i]
 
-			if hit then
+			if matches(log,needle) then
 				shown = shown + 1
+				firstVisible = firstVisible or log
 				if shown > MAX_SHOWN then break end
 				rows[#rows+1] = createRow(log)
 			end
 		end
 
+		if emptyLabel then
+			emptyLabel.Gui.Visible = (shown == 0)
+
+			if shown > 0 then
+				-- nothing else to show
+			elseif #state.logs > 0 then
+				emptyLabel.Gui.Text = ("No remotes match \"%s\".\nClear the filter to see all %d again."):format(filterText,#state.logs)
+			else
+				emptyLabel.Gui.Text = "Waiting for remote calls.\nThey show up here as the game fires them."
+			end
+		end
+
 		updateCount(shown)
+
+		-- nothing picked yet, follow the first visible remote so the pane is not empty
+		if not selectedLog and firstVisible then
+			selectedLog = firstVisible
+			callIndex = 1
+			syncDetail()
+			showCall()
+		end
 	end
 
 	RemoteSpy.Select = function(log)
@@ -15629,46 +15714,18 @@ local function main()
 	RemoteSpy.Init = function()
 		window = Lib.Window.new()
 		window:SetTitle("Remote Spy")
-		window:Resize(520,420)
+		window:Resize(600,470)
 		RemoteSpy.Window = window
 
 		local content = window.GuiElems.Content
 
-		local clearButton = Lib.Button.new()
-		clearButton.Gui.Parent = content
-		clearButton.Gui.Position = UDim2.new(0,0,0,2)
-		clearButton.Gui.Size = UDim2.new(0,46,0,20)
-		clearButton.Gui.Text = "Clear"
-		clearButton.OnClick:Connect(clearLog)
-
-		pauseButton = Lib.Button.new()
-		pauseButton.Gui.Parent = content
-		pauseButton.Gui.Position = UDim2.new(0,50,0,2)
-		pauseButton.Gui.Size = UDim2.new(0,56,0,20)
-		pauseButton.Gui.Text = "Pause"
-		pauseButton.OnClick:Connect(function()
-			paused = not paused
-			pauseButton.Gui.Text = paused and "Resume" or "Pause"
-			setStatus(paused and "Logging paused, calls still go through" or "Logging again")
-		end)
-
-		spamButton = Lib.Button.new()
-		spamButton.Gui.Parent = content
-		spamButton.Gui.Position = UDim2.new(0,110,0,2)
-		spamButton.Gui.Size = UDim2.new(0,66,0,20)
-		spamButton.Gui.Text = "Spam: off"
-		spamButton.OnClick:Connect(function()
-			state.autoIgnore = not state.autoIgnore
-			spamButton.Gui.Text = state.autoIgnore and "Spam: on" or "Spam: off"
-			setStatus(state.autoIgnore and ("Ignoring remotes that fire more than %d times a second"):format(SPAM_CALLS) or "Spam filter off")
-		end)
-
+		-- search on the left, sort order on the right
 		filterBox = Lib.ViewportTextBox.new()
 		filterBox.Gui.Parent = content
-		filterBox.Position = UDim2.new(0,180,0,2)
-		filterBox.Size = UDim2.new(1,-262,0,20)
+		filterBox.Position = UDim2.new(0,4,0,4)
+		filterBox.Size = UDim2.new(1,-136,0,20)
 		filterBox.TextBox.TextSize = 13
-		filterBox.TextBox.PlaceholderText = "filter remotes"
+		filterBox.TextBox.PlaceholderText = "filter by name, method or class"
 
 		local filterPadding = Instance.new("UIPadding")
 		filterPadding.Parent = filterBox.Gui
@@ -15679,14 +15736,80 @@ local function main()
 			rebuild()
 		end)
 
+		sortDrop = Lib.DropDown.new()
+		sortDrop.CanBeEmpty = false
+		sortDrop.Gui.Parent = content
+		sortDrop.Gui.AnchorPoint = Vector2.new(1,0)
+		sortDrop.Gui.Position = UDim2.new(1,-4,0,4)
+		sortDrop.Gui.Size = UDim2.new(0,124,0,20)
+		sortDrop.GuiElems.Label.Gui.TextSize = 13
+		sortDrop:SetOptions(SORT_MODES)
+		sortDrop.OnSelect:Connect(function(option)
+			sortMode = tostring(option or "Newest first")
+			rebuild()
+		end)
+
+		pauseButton = Lib.Button.new()
+		pauseButton.Gui.Parent = content
+		pauseButton.Gui.Position = UDim2.new(0,4,0,28)
+		pauseButton.Gui.Size = UDim2.new(0,60,0,20)
+		pauseButton.Gui.TextSize = 13
+		pauseButton.Gui.Text = "Pause"
+		pauseButton.OnClick:Connect(function()
+			paused = not paused
+			pauseButton.Gui.Text = paused and "Resume" or "Pause"
+			pauseButton.Gui.TextColor3 = paused and Color3.fromRGB(226,168,92) or Settings.Theme.Text
+			setStatus(paused and "Paused, calls still go through but are not logged" or "Logging remote calls again")
+		end)
+
+		spamButton = Lib.Button.new()
+		spamButton.Gui.Parent = content
+		spamButton.Gui.Position = UDim2.new(0,70,0,28)
+		spamButton.Gui.Size = UDim2.new(0,86,0,20)
+		spamButton.Gui.TextSize = 13
+		spamButton.Gui.Text = "Spam: off"
+		spamButton.OnClick:Connect(function()
+			state.autoIgnore = not state.autoIgnore
+			spamButton.Gui.Text = state.autoIgnore and "Spam: on" or "Spam: off"
+			spamButton.Gui.TextColor3 = state.autoIgnore and Color3.fromRGB(226,168,92) or Settings.Theme.Text
+			setStatus(state.autoIgnore and (("Auto ignoring remotes that fire more than %d times a second"):format(SPAM_CALLS)) or "Spam filter off, every call is logged")
+		end)
+
+		local clearButton = Lib.Button.new()
+		clearButton.Gui.Parent = content
+		clearButton.Gui.AnchorPoint = Vector2.new(1,0)
+		clearButton.Gui.Position = UDim2.new(1,-4,0,28)
+		clearButton.Gui.Size = UDim2.new(0,56,0,20)
+		clearButton.Gui.TextSize = 13
+		clearButton.Gui.Text = "Clear"
+		clearButton.OnClick:Connect(clearLog)
+
+		-- left panel: one row per remote and method
+		local listPanel = createSimple("Frame",{
+			BackgroundColor3 = Settings.Theme.Main2,
+			BorderColor3 = Settings.Theme.Outline1,
+			Name = "ListPanel",
+			Position = UDim2.new(0,4,0,52),
+			Size = UDim2.new(0,238,1,-84)
+		})
+		listPanel.Parent = content
+
+		local listHeader = Lib.Label.new()
+		listHeader.Gui.Parent = listPanel
+		listHeader.Gui.Position = UDim2.new(0,8,0,4)
+		listHeader.Gui.Size = UDim2.new(1,-16,0,16)
+		listHeader.Gui.TextSize = 11
+		listHeader.Gui.TextColor3 = Color3.fromRGB(148,148,148)
+		listHeader.Gui.Text = "REMOTE CALLS"
+
 		countLabel = Lib.Label.new()
-		countLabel.Gui.Parent = content
+		countLabel.Gui.Parent = listPanel
 		countLabel.Gui.AnchorPoint = Vector2.new(1,0)
-		countLabel.Gui.Position = UDim2.new(1,0,0,2)
-		countLabel.Gui.Size = UDim2.new(0,76,0,20)
-		countLabel.Gui.TextSize = 12
+		countLabel.Gui.Position = UDim2.new(1,-8,0,4)
+		countLabel.Gui.Size = UDim2.new(0,120,0,16)
+		countLabel.Gui.TextSize = 11
 		countLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
-		countLabel.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		countLabel.Gui.TextColor3 = Color3.fromRGB(148,148,148)
 		countLabel.Gui.Text = "0 remotes"
 
 		listFrame = createSimple("ScrollingFrame",{
@@ -15696,13 +15819,13 @@ local function main()
 			BottomImage = "",
 			CanvasSize = UDim2.new(0,0,0,0),
 			Name = "List",
-			Position = UDim2.new(0,0,0,26),
+			Position = UDim2.new(0,4,0,24),
 			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
-			ScrollBarThickness = 12,
-			Size = UDim2.new(0.5,-6,1,-72),
+			ScrollBarThickness = 6,
+			Size = UDim2.new(1,-8,1,-28),
 			TopImage = ""
 		})
-		listFrame.Parent = content
+		listFrame.Parent = listPanel
 
 		local layout = Instance.new("UIListLayout")
 		layout.FillDirection = Enum.FillDirection.Vertical
@@ -15710,27 +15833,60 @@ local function main()
 		layout.SortOrder = Enum.SortOrder.LayoutOrder
 		layout.Parent = listFrame
 
+		emptyLabel = Lib.Label.new()
+		emptyLabel.Gui.Parent = listPanel
+		emptyLabel.Gui.AnchorPoint = Vector2.new(0.5,0.5)
+		emptyLabel.Gui.Position = UDim2.new(0.5,0,0.5,8)
+		emptyLabel.Gui.Size = UDim2.new(1,-24,0,44)
+		emptyLabel.Gui.TextSize = 12
+		emptyLabel.Gui.TextColor3 = Color3.fromRGB(130,130,130)
+		emptyLabel.Gui.TextXAlignment = Enum.TextXAlignment.Center
+		emptyLabel.Gui.TextYAlignment = Enum.TextYAlignment.Center
+		emptyLabel.Gui.TextWrapped = true
+		emptyLabel.Gui.Text = "Waiting for remote calls.\nThey show up here as the game fires them."
+
+		-- right panel: the selected remote, its calls and the argument editor
+		local detailPanel = createSimple("Frame",{
+			BackgroundColor3 = Settings.Theme.Main2,
+			BorderColor3 = Settings.Theme.Outline1,
+			Name = "DetailPanel",
+			Position = UDim2.new(0,246,0,52),
+			Size = UDim2.new(1,-250,1,-84)
+		})
+		detailPanel.Parent = content
+
 		detailTitle = Lib.Label.new()
-		detailTitle.Gui.Parent = content
-		detailTitle.Gui.Position = UDim2.new(0.5,6,0,26)
-		detailTitle.Gui.Size = UDim2.new(0.5,-6,0,18)
-		detailTitle.Gui.TextSize = 13
+		detailTitle.Gui.Parent = detailPanel
+		detailTitle.Gui.Position = UDim2.new(0,8,0,6)
+		detailTitle.Gui.Size = UDim2.new(1,-16,0,18)
+		detailTitle.Gui.TextSize = 14
 		detailTitle.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 		detailTitle.Gui.Text = "No remote selected"
 
 		detailPath = Lib.Label.new()
-		detailPath.Gui.Parent = content
-		detailPath.Gui.Position = UDim2.new(0.5,6,0,44)
-		detailPath.Gui.Size = UDim2.new(0.5,-6,0,16)
-		detailPath.Gui.TextSize = 12
-		detailPath.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		detailPath.Gui.Parent = detailPanel
+		detailPath.Gui.Position = UDim2.new(0,8,0,24)
+		detailPath.Gui.Size = UDim2.new(1,-16,0,14)
+		detailPath.Gui.TextSize = 11
+		detailPath.Gui.TextColor3 = Color3.fromRGB(150,150,150)
 		detailPath.Gui.TextTruncate = Enum.TextTruncate.AtEnd
-		detailPath.Gui.Text = ""
+		detailPath.Gui.Text = "Pick a remote on the left to see its calls"
+
+		callerLabel = Lib.Label.new()
+		callerLabel.Gui.Parent = detailPanel
+		callerLabel.Gui.Position = UDim2.new(0,8,0,38)
+		callerLabel.Gui.Size = UDim2.new(1,-16,0,14)
+		callerLabel.Gui.Font = Enum.Font.Code
+		callerLabel.Gui.TextSize = 10
+		callerLabel.Gui.TextColor3 = Color3.fromRGB(120,120,120)
+		callerLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+		callerLabel.Gui.Text = ""
 
 		prevButton = Lib.Button.new()
-		prevButton.Gui.Parent = content
-		prevButton.Gui.Position = UDim2.new(0.5,6,0,62)
+		prevButton.Gui.Parent = detailPanel
+		prevButton.Gui.Position = UDim2.new(0,8,0,56)
 		prevButton.Gui.Size = UDim2.new(0,62,0,20)
+		prevButton.Gui.TextSize = 12
 		prevButton.Gui.Text = "< Older"
 		prevButton.OnClick:Connect(function()
 			callIndex = callIndex + 1
@@ -15738,18 +15894,21 @@ local function main()
 		end)
 
 		callLabel = Lib.Label.new()
-		callLabel.Gui.Parent = content
-		callLabel.Gui.Position = UDim2.new(0.5,72,0,62)
-		callLabel.Gui.Size = UDim2.new(0,110,0,20)
-		callLabel.Gui.TextSize = 12
+		callLabel.Gui.Parent = detailPanel
+		callLabel.Gui.Position = UDim2.new(0,72,0,56)
+		callLabel.Gui.Size = UDim2.new(1,-144,0,20)
+		callLabel.Gui.TextSize = 11
+		callLabel.Gui.TextColor3 = Color3.fromRGB(150,150,150)
 		callLabel.Gui.TextXAlignment = Enum.TextXAlignment.Center
 		callLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 		callLabel.Gui.Text = "no calls"
 
 		nextButton = Lib.Button.new()
-		nextButton.Gui.Parent = content
-		nextButton.Gui.Position = UDim2.new(0.5,186,0,62)
+		nextButton.Gui.Parent = detailPanel
+		nextButton.Gui.AnchorPoint = Vector2.new(1,0)
+		nextButton.Gui.Position = UDim2.new(1,-8,0,56)
 		nextButton.Gui.Size = UDim2.new(0,62,0,20)
+		nextButton.Gui.TextSize = 12
 		nextButton.Gui.Text = "Newer >"
 		nextButton.OnClick:Connect(function()
 			callIndex = callIndex - 1
@@ -15759,17 +15918,19 @@ local function main()
 		local editorFrame = createSimple("Frame",{
 			BackgroundColor3 = Settings.Theme.TextBox,
 			BorderColor3 = Settings.Theme.Outline3,
+			BorderSizePixel = 0,
+			ClipsDescendants = true,
 			Name = "Arguments",
-			Position = UDim2.new(0.5,6,0,86),
-			Size = UDim2.new(0.5,-6,1,-132)
+			Position = UDim2.new(0,8,0,80),
+			Size = UDim2.new(1,-16,1,-118)
 		})
-		editorFrame.Parent = content
+		editorFrame.Parent = detailPanel
 
 		local editorPadding = Instance.new("UIPadding")
-		editorPadding.PaddingTop = UDim.new(0,3)
-		editorPadding.PaddingBottom = UDim.new(0,3)
-		editorPadding.PaddingLeft = UDim.new(0,5)
-		editorPadding.PaddingRight = UDim.new(0,3)
+		editorPadding.PaddingTop = UDim.new(0,4)
+		editorPadding.PaddingBottom = UDim.new(0,4)
+		editorPadding.PaddingLeft = UDim.new(0,6)
+		editorPadding.PaddingRight = UDim.new(0,4)
 		editorPadding.Parent = editorFrame
 
 		argsBox = Instance.new("TextBox")
@@ -15788,28 +15949,42 @@ local function main()
 		argsBox.TextYAlignment = Enum.TextYAlignment.Top
 		argsBox.Parent = editorFrame
 
-		local function detailButton(text,x,width,onClick)
+		local actionRow = createSimple("Frame",{
+			BackgroundTransparency = 1,
+			Name = "Actions",
+			Position = UDim2.new(0,8,1,-30),
+			Size = UDim2.new(1,-16,0,22)
+		})
+		actionRow.Parent = detailPanel
+
+		local actionLayout = Instance.new("UIListLayout")
+		actionLayout.FillDirection = Enum.FillDirection.Horizontal
+		actionLayout.Padding = UDim.new(0,4)
+		actionLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		actionLayout.Parent = actionRow
+
+		local function actionButton(text,onClick)
 			local button = Lib.Button.new()
-			button.Gui.Parent = content
-			button.Gui.AnchorPoint = Vector2.new(0,1)
-			button.Gui.Position = UDim2.new(0.5,x,1,-22)
-			button.Gui.Size = UDim2.new(0,width,0,20)
+			button.Gui.Parent = actionRow
+			button.Gui.Size = UDim2.new(0.25,-4,1,0)
+			button.Gui.TextSize = 13
 			button.Gui.Text = text
 			button.OnClick:Connect(onClick)
 			return button
 		end
 
-		detailButton("Fire",6,44,fireSelected)
-		blockButton = detailButton("Block",54,58,toggleBlock)
-		ignoreButton = detailButton("Ignore",116,58,toggleIgnore)
-		detailButton("Copy",178,44,copySelected)
+		actionButton("Fire",fireSelected)
+		blockButton = actionButton("Block",toggleBlock)
+		ignoreButton = actionButton("Ignore",toggleIgnore)
+		actionButton("Copy",copySelected)
 
 		statusLabel = Lib.Label.new()
 		statusLabel.Gui.Parent = content
 		statusLabel.Gui.AnchorPoint = Vector2.new(0,1)
-		statusLabel.Gui.Position = UDim2.new(0,0,1,0)
-		statusLabel.Gui.Size = UDim2.new(1,0,0,18)
+		statusLabel.Gui.Position = UDim2.new(0,4,1,-4)
+		statusLabel.Gui.Size = UDim2.new(1,-8,0,18)
 		statusLabel.Gui.TextSize = 12
+		statusLabel.Gui.TextColor3 = Color3.fromRGB(150,150,150)
 		statusLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 		statusLabel.Gui.Text = "Listening for remote calls"
 
