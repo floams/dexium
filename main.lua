@@ -3912,7 +3912,7 @@ return search]==]
 		local menuRowH,menuPad = 24,4
 		local menuWidth = 0
 		for i = 1,#filterRows do
-			local textW = getTextSize(filterRows[i].Name,13,Enum.Font.SourceSans,Vector2.new(1000,1000)).X
+			local textW = service.TextService:GetTextSize(filterRows[i].Name,13,Enum.Font.SourceSans,Vector2.new(1000,1000)).X
 			if textW > menuWidth then menuWidth = textW end
 		end
 		menuWidth = math.max(148,math.floor(menuWidth + 18))
@@ -19199,7 +19199,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.33" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.34" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
