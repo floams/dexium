@@ -15072,21 +15072,21 @@ local function main()
 	local activeMethod = "FireServer"
 	local lastSeq = -1
 
-	-- Cobalt's palette: near black surfaces with one accent per call kind
+	-- Cobalt's layout, drawn with this window's own theme colours
 	local C = {
-		body = Color3.fromRGB(18,18,18),
-		panel = Color3.fromRGB(22,22,22),
-		card = Color3.fromRGB(32,32,32),
-		hover = Color3.fromRGB(44,44,44),
-		chosen = Color3.fromRGB(52,52,52),
-		line = Color3.fromRGB(40,40,40),
-		text = Color3.fromRGB(238,238,238),
-		muted = Color3.fromRGB(146,146,146),
-		dim = Color3.fromRGB(108,108,108),
-		blue = Color3.fromRGB(104,162,247),
-		amber = Color3.fromRGB(230,172,98),
-		red = Color3.fromRGB(232,124,124),
-		warn = Color3.fromRGB(46,40,30)
+		panel = Settings.Theme.Main1,
+		card = Settings.Theme.Button,
+		hover = Settings.Theme.ButtonHover,
+		field = Settings.Theme.TextBox,
+		line = Settings.Theme.Outline1,
+		text = Settings.Theme.Text,
+		muted = Color3.fromRGB(158,158,158),
+		dim = Settings.Theme.PlaceholderText,
+		primary = Settings.Theme.ListSelection,
+		blue = Color3.fromRGB(108,168,238),
+		amber = Color3.fromRGB(226,168,92),
+		red = Color3.fromRGB(235,140,140),
+		warn = Settings.Theme.Button
 	}
 
 	-- every pressable thing in this app is one of these flat dark chips
@@ -15103,7 +15103,7 @@ local function main()
 		button.TextTruncate = Enum.TextTruncate.AtEnd
 
 		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(0,5)
+		corner.CornerRadius = UDim.new(0,4)
 		corner.Parent = button
 
 		local obj = {
@@ -15532,7 +15532,7 @@ local function main()
 		row.Parent = listFrame
 
 		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(0,6)
+		corner.CornerRadius = UDim.new(0,4)
 		corner.Parent = row
 
 		local accent = Instance.new("Frame")
@@ -15554,7 +15554,11 @@ local function main()
 		name.Gui.Position = UDim2.new(0,12,0,10)
 		name.Gui.Size = UDim2.new(1,-58,0,16)
 		name.Gui.Text = log.name
-		name.Gui.TextColor3 = blocked and C.red or (log.ignored and C.dim or C.text)
+		if selected then
+			name.Gui.TextColor3 = Color3.fromRGB(255,255,255)
+		else
+			name.Gui.TextColor3 = blocked and C.red or (log.ignored and C.dim or C.text)
+		end
 		name.Gui.TextSize = 13
 		name.Gui.TextTruncate = Enum.TextTruncate.AtEnd
 
@@ -15565,7 +15569,7 @@ local function main()
 		count.Gui.Position = UDim2.new(1,-10,0,10)
 		count.Gui.Size = UDim2.new(0,44,0,16)
 		count.Gui.Text = ("x%d"):format(log.count)
-		count.Gui.TextColor3 = log.count > 0 and C.muted or C.dim
+		count.Gui.TextColor3 = selected and Color3.fromRGB(226,235,250) or (log.count > 0 and C.muted or C.dim)
 		count.Gui.TextSize = 11
 		count.Gui.TextXAlignment = Enum.TextXAlignment.Right
 
@@ -15808,11 +15812,6 @@ local function main()
 		RemoteSpy.Window = window
 
 		local content = window.GuiElems.Content
-		content.BackgroundColor3 = C.body
-
-		pcall(function()
-			window.GuiElems.TopBar.BackgroundColor3 = Color3.fromRGB(24,24,24)
-		end)
 
 		-- header: one tab per kind of call on the left, search on the right
 		local header = createSimple("Frame",{
@@ -15835,7 +15834,7 @@ local function main()
 		tabButtons = {}
 
 		local function addTab(method,text,x)
-			local tab = makeButton(text,C.chosen,C.dim,function()
+			local tab = makeButton(text,C.hover,C.dim,function()
 				if activeMethod == method then return end
 
 				activeMethod = method
@@ -15858,7 +15857,7 @@ local function main()
 		filterBox = Lib.ViewportTextBox.new()
 		filterBox.Gui.Parent = header
 		filterBox.Gui.AnchorPoint = Vector2.new(1,0)
-		filterBox.Gui.BackgroundColor3 = C.card
+		filterBox.Gui.BackgroundColor3 = C.field
 		filterBox.Gui.BorderSizePixel = 0
 		filterBox.Gui.Position = UDim2.new(1,-8,0,6)
 		filterBox.Gui.Size = UDim2.new(0,196,0,24)
@@ -15869,7 +15868,7 @@ local function main()
 		filterBox.TextBox.TextSize = 13
 
 		local filterCorner = Instance.new("UICorner")
-		filterCorner.CornerRadius = UDim.new(0,5)
+		filterCorner.CornerRadius = UDim.new(0,4)
 		filterCorner.Parent = filterBox.Gui
 
 		local filterPadding = Instance.new("UIPadding")
@@ -15930,7 +15929,7 @@ local function main()
 		end)
 
 		local sortCorner = Instance.new("UICorner")
-		sortCorner.CornerRadius = UDim.new(0,5)
+		sortCorner.CornerRadius = UDim.new(0,4)
 		sortCorner.Parent = sortDrop.Gui
 
 		listFrame = createSimple("ScrollingFrame",{
@@ -15965,7 +15964,7 @@ local function main()
 		emptyLabel.Gui.Position = UDim2.new(0,126,0.5,10)
 		emptyLabel.Gui.Size = UDim2.new(0,206,0,44)
 		emptyLabel.Gui.Text = "Waiting for the game to fire a remote.\nCalls appear here as they happen."
-		emptyLabel.Gui.TextColor3 = C.dim
+		emptyLabel.Gui.TextColor3 = C.muted
 		emptyLabel.Gui.TextSize = 12
 		emptyLabel.Gui.TextWrapped = true
 		emptyLabel.Gui.TextXAlignment = Enum.TextXAlignment.Center
@@ -16069,7 +16068,7 @@ local function main()
 		callLabel.Gui.TextXAlignment = Enum.TextXAlignment.Center
 
 		local editor = createSimple("Frame",{
-			BackgroundColor3 = C.card,
+			BackgroundColor3 = C.field,
 			BorderSizePixel = 0,
 			ClipsDescendants = true,
 			Name = "Arguments",
@@ -16079,7 +16078,7 @@ local function main()
 		editor.Parent = content
 
 		local editorCorner = Instance.new("UICorner")
-		editorCorner.CornerRadius = UDim.new(0,6)
+		editorCorner.CornerRadius = UDim.new(0,4)
 		editorCorner.Parent = editor
 
 		local editorStroke = Instance.new("UIStroke")
@@ -16104,7 +16103,7 @@ local function main()
 		argsBox.PlaceholderText = "Arguments as source, for example 123, \"hello\", {a = 1}"
 		argsBox.Size = UDim2.new(1,0,1,0)
 		argsBox.Text = ""
-		argsBox.TextColor3 = Color3.fromRGB(220,220,220)
+		argsBox.TextColor3 = Settings.Theme.Text
 		argsBox.TextSize = 12
 		argsBox.TextWrapped = true
 		argsBox.TextXAlignment = Enum.TextXAlignment.Left
@@ -16126,7 +16125,7 @@ local function main()
 		actionLayout.Parent = actionRow
 
 		local function actionButton(text,primary,onClick)
-			local button = makeButton(text,primary and C.blue or C.card,C.text,onClick)
+			local button = makeButton(text,primary and C.primary or C.card,C.text,onClick)
 			button.Gui.Parent = actionRow
 			button.Gui.Size = UDim2.new(0.25,-4,1,0)
 			return button
