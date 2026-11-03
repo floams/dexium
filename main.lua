@@ -17187,8 +17187,14 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.22" -- bumped by 0.01 with every update
+	Main.Version = "2.23" -- bumped by 0.01 with every update
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
+	Main.RepoUrl = "https://github.com/floams/dexium"
+	Main.VersionUrl = "https://raw.githubusercontent.com/floams/dexium/main/version.txt"
+	Main.SourceUrl = "https://raw.githubusercontent.com/floams/dexium/main/main.lua"
+	Main.LatestVersion = nil
+	Main.VersionChecked = false
+	Main.Outdated = false
 	Main.Mouse = plr:GetMouse()
 	Main.AppControls = {}
 	Main.CreatedGuis = {}
@@ -18453,6 +18459,209 @@ Main = (function()
 		Lib.ShowGui(gui)
 	end
 
+	Main.HttpGet = function(url)
+		local target = oldgame or game
+
+		if target and target.HttpGet then
+			local ok,res = pcall(target.HttpGet,target,url)
+			if ok and type(res) == "string" and res ~= "" then return res end
+		end
+
+		local req = env.request or request or http_request
+		if req then
+			local ok,res = pcall(req,{Url = url,Method = "GET"})
+			if ok and type(res) == "table" and res.Body then return res.Body end
+		end
+
+		return nil
+	end
+
+	local function versionParts(text)
+		local parts = {}
+		for piece in tostring(text or ""):gmatch("%d+") do parts[#parts+1] = tonumber(piece) end
+		return parts
+	end
+
+	-- true when candidate is a newer build than current, comparing each number in turn
+	Main.IsNewer = function(candidate,current)
+		local newer = versionParts(candidate)
+		local here = versionParts(current)
+		if #newer == 0 then return false end
+
+		for i = 1,math.max(#newer,#here) do
+			local left = newer[i] or 0
+			local right = here[i] or 0
+			if left ~= right then return left > right end
+		end
+
+		return false
+	end
+
+	Main.RefreshVersionDisplay = function()
+		local button = Main.SettingsVersionButton
+		if not button then return end
+
+		local ok = pcall(function()
+			if Main.Outdated and Main.LatestVersion then
+				button.Text = ("Version: %s <font color=\"#e88c8c\"><b>[OUTDATED!]</b></font>"):format(Main.Version)
+			else
+				button.Text = ("Version: %s"):format(Main.Version)
+			end
+		end)
+
+		if not ok then Main.SettingsVersionButton = nil end
+	end
+
+	-- a small card in the bottom right, used to tell the player about a newer build
+	Main.ShowNotice = function(title,body,hint)
+		if Main.Unloaded then return end
+
+		local holder = createSimple("ScreenGui",{
+			DisplayOrder = Main.DisplayOrders.Core + 2,
+			IgnoreGuiInset = true,
+			Name = "DexiumNotice",
+			ResetOnSpawn = false
+		})
+
+		local card = createSimple("TextButton",{
+			AnchorPoint = Vector2.new(1,1),
+			AutoButtonColor = false,
+			BackgroundColor3 = Settings.Theme.Main1,
+			BorderColor3 = Settings.Theme.Outline1,
+			BorderSizePixel = 1,
+			ClipsDescendants = true,
+			Name = "Card",
+			Position = UDim2.new(1,320,1,-12),
+			Size = UDim2.new(0,300,0,74),
+			Text = ""
+		})
+		card.Parent = holder
+
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0,4)
+		corner.Parent = card
+
+		local accent = createSimple("Frame",{
+			BackgroundColor3 = Color3.fromRGB(226,168,92),
+			BorderSizePixel = 0,
+			Name = "Accent",
+			Size = UDim2.new(0,3,1,0)
+		})
+		accent.Parent = card
+
+		local titleLabel = createSimple("TextLabel",{
+			BackgroundTransparency = 1,
+			Font = Enum.Font.SourceSansBold,
+			Name = "Title",
+			Position = UDim2.new(0,12,0,8),
+			Size = UDim2.new(1,-48,0,16),
+			Text = title,
+			TextColor3 = Settings.Theme.Text,
+			TextSize = 14,
+			TextXAlignment = Enum.TextXAlignment.Left
+		})
+		titleLabel.Parent = card
+
+		local bodyLabel = createSimple("TextLabel",{
+			BackgroundTransparency = 1,
+			Font = Enum.Font.SourceSans,
+			Name = "Body",
+			Position = UDim2.new(0,12,0,26),
+			Size = UDim2.new(1,-24,0,28),
+			Text = body,
+			TextColor3 = Color3.fromRGB(168,168,168),
+			TextSize = 12,
+			TextWrapped = true,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top
+		})
+		bodyLabel.Parent = card
+
+		local hintLabel = createSimple("TextLabel",{
+			BackgroundTransparency = 1,
+			Font = Enum.Font.SourceSans,
+			Name = "Hint",
+			Position = UDim2.new(0,12,1,-18),
+			Size = UDim2.new(1,-24,0,14),
+			Text = hint or "",
+			TextColor3 = Color3.fromRGB(120,120,120),
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left
+		})
+		hintLabel.Parent = card
+
+		local close = createSimple("TextButton",{
+			BackgroundTransparency = 1,
+			Font = Enum.Font.SourceSansBold,
+			Name = "Close",
+			Position = UDim2.new(1,-26,0,4),
+			Size = UDim2.new(0,20,0,20),
+			Text = "x",
+			TextColor3 = Color3.fromRGB(140,140,140),
+			TextSize = 13
+		})
+		close.Parent = card
+
+		Main.ShowGui(holder)
+
+		local tweenInfo = TweenInfo.new(0.25,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
+		local hidden = UDim2.new(1,320,1,-12)
+		service.TweenService:Create(card,tweenInfo,{Position = UDim2.new(1,-12,1,-12)}):Play()
+
+		local closed = false
+		local function dismiss()
+			if closed then return end
+			closed = true
+
+			local tween = service.TweenService:Create(card,tweenInfo,{Position = hidden})
+			tween.Completed:Connect(function()
+				pcall(function() holder:Destroy() end)
+			end)
+			tween:Play()
+		end
+
+		close.MouseButton1Click:Connect(dismiss)
+
+		card.MouseButton1Click:Connect(function()
+			if setclipboard then pcall(setclipboard,Main.RepoUrl) end
+			hintLabel.Text = "Repo link copied to your clipboard"
+			hintLabel.TextColor3 = Color3.fromRGB(160,200,255)
+			task.delay(1.5,dismiss)
+		end)
+
+		task.delay(12,dismiss)
+	end
+
+	Main.CheckVersion = function()
+		task.spawn(function()
+			local raw = Main.HttpGet(Main.VersionUrl)
+			local latest = raw and raw:match("(%d+%.%d+)")
+
+			if not latest then
+				local source = Main.HttpGet(Main.SourceUrl)
+				if source then
+					latest = source:match("Main%.Version%s*=%s*\"([%d%.]+)\"")
+				end
+			end
+
+			Main.VersionChecked = true
+
+			if not latest then
+				Main.RefreshVersionDisplay()
+				return
+			end
+
+			Main.LatestVersion = latest
+			Main.Outdated = Main.IsNewer(latest,Main.Version)
+			Main.RefreshVersionDisplay()
+
+			if Main.Outdated and not Main.OutdatedNotified then
+				Main.OutdatedNotified = true
+				Main.ShowNotice("Dexium is outdated",("You are on %s, GitHub has %s."):format(Main.Version,latest),"Click to copy the repo link")
+			end
+		end)
+	end
+
 	Main.OpenSettings = function()
 		if Main.Unloaded then return end
 
@@ -18480,7 +18689,21 @@ Main = (function()
 		end
 
 		label("ABOUT",6,14,11,Color3.fromRGB(148,148,148))
-		label("Version: " .. Main.Version,24,18)
+		local versionButton = createSimple("TextButton",{
+			AutoButtonColor = false,
+			BackgroundTransparency = 1,
+			Font = Enum.Font.SourceSans,
+			Name = "Version",
+			Position = UDim2.new(0,10,0,24),
+			RichText = true,
+			Size = UDim2.new(1,-20,0,18),
+			Text = ("Version: %s"):format(Main.Version),
+			TextColor3 = Settings.Theme.Text,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left
+		})
+		versionButton.Parent = content
+		Main.SettingsVersionButton = versionButton
 		label("Creator: floams",42,16,12,Color3.fromRGB(160,160,160))
 		label("Executor: " .. (Main.Executor or "unknown"),60,16,12,Color3.fromRGB(160,160,160))
 
@@ -18491,6 +18714,14 @@ Main = (function()
 		note.Gui.TextYAlignment = Enum.TextYAlignment.Top
 
 		local status = label("",156,18,12,Color3.fromRGB(160,160,160))
+
+		Main.RefreshVersionDisplay()
+
+		versionButton.MouseButton1Click:Connect(function()
+			if Main.Unloaded then return end
+			if setclipboard then pcall(setclipboard,Main.RepoUrl) end
+			status.Gui.Text = "Copied the repo link."
+		end)
 
 		local unloadButton = Lib.Button.new()
 		unloadButton.Gui.Parent = content
@@ -18724,6 +18955,10 @@ Main = (function()
 		Properties.Window:Show({Align = "right", Pos = 2, Size = 0.5, Silent = true})
 		
 		Lib.DeferFunc(function() Lib.Window.ToggleSide("right") end)
+
+		task.delay(3,function()
+			pcall(Main.CheckVersion)
+		end)
 	end
 
 	return Main
