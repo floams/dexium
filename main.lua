@@ -940,6 +940,7 @@ local function main()
 		{Name = "Sounds", Test = function(o) return o:IsA("Sound") end},
 		{Name = "Folders", Test = function(o) return o.ClassName == "Folder" end},
 		{Name = "ClickDetectors", Test = function(o) return o:IsA("ClickDetector") end},
+		{Name = "Gears", Test = function(o) return o:IsA("Tool") or o:IsA("HopperBin") end},
 	}
 	Explorer.FilterGroup = nil
 
@@ -959,9 +960,12 @@ local function main()
 		if rows then
 			for i = 1,#rows do
 				local row = rows[i]
-				local isActive = (row.Group == Explorer.FilterGroup)
-				row.Button.TextColor3 = isActive and Explorer.AccentColor or Color3.fromRGB(210,210,210)
-				row.Button.Text = (isActive and "• " or "   ")..row.Name
+				-- "All" is the active row exactly when no group is applied
+				local isActive = row.IsAll and (Explorer.FilterGroup == nil) or (row.Group ~= nil and row.Group == Explorer.FilterGroup)
+				row.Active = isActive
+				row.Button.Text = row.Name
+				row.Button.TextColor3 = isActive and Settings.Theme.Text or Color3.fromRGB(200,200,200)
+				row.Button.BackgroundTransparency = isActive and 0 or 1
 			end
 		end
 	end
@@ -3904,13 +3908,22 @@ return search]==]
 			filterRows[#filterRows+1] = Explorer.Filters[i]
 		end
 
+		-- width fits the longest label so nothing truncates, and the menu hangs under the button
+		local menuRowH,menuPad = 24,4
+		local menuWidth = 0
+		for i = 1,#filterRows do
+			local textW = getTextSize(filterRows[i].Name,13,Enum.Font.SourceSans,Vector2.new(1000,1000)).X
+			if textW > menuWidth then menuWidth = textW end
+		end
+		menuWidth = math.max(148,math.floor(menuWidth + 18))
+
 		Explorer.FilterMenu = create({
-			{1,"Frame",{BackgroundColor3=Color3.fromRGB(32,32,32),BorderSizePixel=0,Name="FilterMenu",Parent=window.GuiElems.Content,Position=UDim2.new(1,-166,0,tbH+2),Size=UDim2.new(0,160,0,#filterRows*23+10),Visible=false,ZIndex=50}},
-			{2,"UICorner",{CornerRadius=UDim.new(0,6),Parent={1},}},
-			{3,"UIStroke",{Thickness=1,Parent={1},Color=Color3.fromRGB(64,64,64)}},
+			{1,"Frame",{BackgroundColor3=Settings.Theme.Menu,BorderSizePixel=0,Name="FilterMenu",Parent=window.GuiElems.Content,Position=UDim2.new(1,-6-menuWidth,0,tbH+2),Size=UDim2.new(0,menuWidth,0,#filterRows*menuRowH+menuPad*2+4),Visible=false,ZIndex=50}},
+			{2,"UICorner",{CornerRadius=UDim.new(0,4),Parent={1},}},
+			{3,"UIStroke",{Thickness=1,Parent={1},Color=Settings.Theme.Outline2}},
 			{4,"Frame",{BackgroundTransparency=1,Name="Holder",Parent={1},Size=UDim2.new(1,0,1,0),ZIndex=50,}},
 			{5,"UIListLayout",{Parent={4},Padding=UDim.new(0,1),SortOrder=Enum.SortOrder.LayoutOrder,}},
-			{6,"UIPadding",{Parent={4},PaddingTop=UDim.new(0,5),PaddingBottom=UDim.new(0,5),PaddingLeft=UDim.new(0,5),PaddingRight=UDim.new(0,5),}},
+			{6,"UIPadding",{Parent={4},PaddingTop=UDim.new(0,menuPad),PaddingBottom=UDim.new(0,menuPad),PaddingLeft=UDim.new(0,menuPad),PaddingRight=UDim.new(0,menuPad),}},
 		})
 
 		local filterHolder = Explorer.FilterMenu.Holder
@@ -3920,37 +3933,45 @@ return search]==]
 			local item = filterRows[i]
 			local row = createSimple("TextButton",{
 				AutoButtonColor = false,
+				BackgroundColor3 = Settings.Theme.ListSelection,
 				BackgroundTransparency = 1,
 				BorderSizePixel = 0,
 				Font = Enum.Font.SourceSans,
 				LayoutOrder = i,
 				Name = "Row"..i,
 				Parent = filterHolder,
-				Size = UDim2.new(1,0,0,22),
-				Text = "   "..item.Name,
-				TextColor3 = Color3.fromRGB(210,210,210),
+				Size = UDim2.new(1,0,0,menuRowH),
+				Text = item.Name,
+				TextColor3 = Color3.fromRGB(200,200,200),
 				TextSize = 13,
 				TextXAlignment = Enum.TextXAlignment.Left,
 				ZIndex = 51
 			})
 
+			createSimple("UICorner",{Parent = row,CornerRadius = UDim.new(0,4)})
+			createSimple("UIPadding",{Parent = row,PaddingLeft = UDim.new(0,8)})
+
 			row.InputBegan:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseMovement then
-					row.BackgroundColor3 = Color3.fromRGB(48,48,48)
-					row.BackgroundTransparency = 0.2
-				end
+				if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+				local info = Explorer.FilterRows[i]
+				if info and info.Active then return end
+				row.BackgroundColor3 = Settings.Theme.ButtonHover
+				row.BackgroundTransparency = 0
+				row.TextColor3 = Settings.Theme.Text
 			end)
 			row.InputEnded:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseMovement then
-					row.BackgroundTransparency = 1
-				end
+				if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+				local info = Explorer.FilterRows[i]
+				if info and info.Active then return end
+				row.BackgroundTransparency = 1
+				row.TextColor3 = Color3.fromRGB(200,200,200)
 			end)
 			row.MouseButton1Click:Connect(function()
 				Explorer.SetFilter(item.Test and item or nil)
 				Explorer.ToggleFilterMenu(false)
 			end)
 
-			Explorer.FilterRows[i] = {Button = row, Group = (item.Test and item or nil), Name = item.Name}
+			Explorer.FilterRows[i] = {Button = row, Group = (item.Test and item or nil), Name = item.Name, IsAll = (item.Test == nil), Active = false}
 		end
 
 		filterButton.MouseButton1Click:Connect(function()
@@ -19178,7 +19199,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.32" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.33" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
