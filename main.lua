@@ -17187,7 +17187,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.21" -- bumped by 0.01 with every update
+	Main.Version = "2.22" -- bumped by 0.01 with every update
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.Mouse = plr:GetMouse()
 	Main.AppControls = {}
@@ -18480,20 +18480,21 @@ Main = (function()
 		end
 
 		label("ABOUT",6,14,11,Color3.fromRGB(148,148,148))
-		label(("Dexium %s on %s"):format(Main.Version,Main.Executor or "this executor"),24,18)
-		label(("Core access: %s      Modules: %d"):format(Main.Elevated and "yes" or "no",#Main.ModuleList),44,16,12,Color3.fromRGB(160,160,160))
+		label("Version: " .. Main.Version,24,18)
+		label("Creator: floams",42,16,12,Color3.fromRGB(160,160,160))
+		label("Executor: " .. (Main.Executor or "unknown"),60,16,12,Color3.fromRGB(160,160,160))
 
-		label("UNLOAD",78,14,11,Color3.fromRGB(148,148,148))
+		label("UNLOAD",88,14,11,Color3.fromRGB(148,148,148))
 
-		local note = label("Closes every Dexium window, stops the background loops and puts the remote hook back. The game keeps running, so run the newer file to load it again.",96,44,12,Color3.fromRGB(160,160,160))
+		local note = label("Closes every Dexium window, stops the background loops and puts the remote hook back. The game keeps running, so run the newer file to load it again.",106,44,12,Color3.fromRGB(160,160,160))
 		note.Gui.TextWrapped = true
 		note.Gui.TextYAlignment = Enum.TextYAlignment.Top
 
-		local status = label("",146,18,12,Color3.fromRGB(160,160,160))
+		local status = label("",156,18,12,Color3.fromRGB(160,160,160))
 
 		local unloadButton = Lib.Button.new()
 		unloadButton.Gui.Parent = content
-		unloadButton.Gui.Position = UDim2.new(0,10,0,172)
+		unloadButton.Gui.Position = UDim2.new(0,10,0,182)
 		unloadButton.Gui.Size = UDim2.new(1,-20,0,28)
 		unloadButton.Gui.TextSize = 13
 		unloadButton.Gui.Text = "Unload Dexium"
@@ -18528,7 +18529,8 @@ Main = (function()
 			end
 		end)
 
-		label("Settings live in " .. Main.SettingsPath .. ", so a reload keeps your theme.",212,16,11,Color3.fromRGB(130,130,130))
+		local settingsFile = Main.SettingsPath:match("[^/]+$") or Main.SettingsPath
+		label("Settings are saved in " .. settingsFile .. ", so a reload keeps your theme.",222,16,11,Color3.fromRGB(130,130,130))
 
 		window:Show()
 	end
