@@ -17187,7 +17187,8 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.2"
+	Main.Version = "2.21" -- bumped by 0.01 with every update
+	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.Mouse = plr:GetMouse()
 	Main.AppControls = {}
 	Main.CreatedGuis = {}
@@ -17704,7 +17705,7 @@ Main = (function()
 	--warn(Main.ExportSettings())
 
 	Main.LoadSettings = function()
-		local s, data = pcall(env.readfile or error, "DexPlusPlusSettings.json")
+		local s, data = pcall(env.readfile or error, Main.SettingsPath)
 		if s and data and data ~= "" then
 			local s, decoded = pcall(service.HttpService.JSONDecode, service.HttpService, data)
 			if s and decoded then
@@ -18527,7 +18528,7 @@ Main = (function()
 			end
 		end)
 
-		label("Settings live in DexPlusPlusSettings.json, so a reload keeps your theme.",212,16,11,Color3.fromRGB(130,130,130))
+		label("Settings live in " .. Main.SettingsPath .. ", so a reload keeps your theme.",212,16,11,Color3.fromRGB(130,130,130))
 
 		window:Show()
 	end
@@ -18587,6 +18588,7 @@ Main = (function()
 
 		local writefile,makefolder = env.writefile,env.makefolder
 
+		pcall(makefolder,"DexiumExplorer")
 		makefolder("dex")
 		makefolder("dex/assets")
 		makefolder("dex/saved")
@@ -18601,8 +18603,11 @@ Main = (function()
 	Main.Init = function()
 		Main.Elevated = pcall(function() local a = game:GetService("CoreGui"):GetFullName() end)
 		
-		if writefile and isfile and not isfile("DexPlusPlusSettings.json") then
-			writefile("DexPlusPlusSettings.json", Main.ExportSettings())
+		if writefile and isfile then
+			if makefolder then pcall(makefolder,"DexiumExplorer") end
+			if not isfile(Main.SettingsPath) then
+				writefile(Main.SettingsPath, Main.ExportSettings())
+			end
 		end
 		
 		Main.InitEnv()
