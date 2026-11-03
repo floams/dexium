@@ -764,6 +764,8 @@ local function main()
 		local focussedOutput
 
 		LogService.MessageOut:Connect(function(msg, msgtype)
+			if Main.Unloaded then return end
+
 			local formattedText = ""
 			local unformattedText = ""
 			local newOutputText = Console.OutputTemplate:Clone()
@@ -3669,6 +3671,8 @@ return search]==]
 		coroutine.wrap(function()
 			local fw = Lib.FastWait
 			while true do
+				if Main.Unloaded then return end
+
 				local processed = false
 				local c = 0
 				for _,node in next,nodes do
@@ -4120,7 +4124,7 @@ local function main()
 	end)()
 
 	Lib.CheckMouseInGui = function(gui)
-		if gui == nil then return false end
+		if gui == nil or Main.Unloaded then return false end
 		local mouse = Main.Mouse
 		local guiPosition = gui.AbsolutePosition
 		local guiSize = gui.AbsoluteSize	
@@ -8541,6 +8545,8 @@ local function main()
 
 			coroutine.wrap(function()
 				while self.Editable do
+					if Main.Unloaded then return end
+
 					Lib.FastWait(0.5)
 					if self.LastAnimTime ~= animTime then return end
 					lineTweens.Invis:Play()
@@ -15371,8 +15377,22 @@ local function main()
 			return false,tostring(result)
 		end
 
+		state.originalNamecall = result
 		state.hooked = true
 		return true
+	end
+
+	-- puts the namecall hook back and drops the shared log so a reload starts clean
+	RemoteSpy.Unload = function()
+		if state.hooked and state.originalNamecall and hookmetamethod then
+			pcall(hookmetamethod,game,"__namecall",state.originalNamecall)
+		end
+
+		state.hooked = false
+		state.originalNamecall = nil
+
+		local holder = (getgenv and getgenv()) or _G
+		if holder.__DexiumRemoteSpy == state then holder.__DexiumRemoteSpy = nil end
 	end
 
 	local function logPath(log)
@@ -16101,6 +16121,7 @@ local function main()
 
 			while true do
 				task.wait(REFRESH_INTERVAL)
+				if Main.Unloaded then return end
 
 				if state.spamCount ~= seenSpam then
 					seenSpam = state.spamCount
@@ -17166,6 +17187,9 @@ Main = (function()
 	Main.Version = "2.2"
 	Main.Mouse = plr:GetMouse()
 	Main.AppControls = {}
+	Main.CreatedGuis = {}
+	Main.OwnedGlobals = {}
+	Main.Unloaded = false
 	Main.Apps = Apps
 	Main.MenuApps = {}
 	Main.GitRepoName = "AZYsGithub/DexPlusPlus"
@@ -17252,6 +17276,12 @@ Main = (function()
 	end
 	
 	Main.SecureGui = function(gui)
+		if Main.Unloaded then
+			pcall(function() gui:Destroy() end)
+			return
+		end
+
+		Main.CreatedGuis[gui] = true
 		--warn("Secured: "..gui.Name)
 		gui.Name = Main.GetRandomString()
 		-- service already using cloneref
@@ -17454,6 +17484,7 @@ Main = (function()
 			end
 			
 			getgenv().saveinstance = wrappedsaveinstance
+			Main.OwnedGlobals.saveinstance = wrappedsaveinstance
 			return wrappedsaveinstance
 		end)()
 		
@@ -17542,6 +17573,7 @@ Main = (function()
 			end
 
 			getgenv().decompile = decompile
+			Main.OwnedGlobals.decompile = decompile
 			
 			env.decompile = decompile
 			return decompile
@@ -18248,6 +18280,8 @@ Main = (function()
 	end
 
 	Main.SetMainGuiOpen = function(val)
+		if Main.Unloaded then return end
+
 		Main.MainGuiOpen = val
 
 		Main.MainGui.OpenButton.Text = val and "Close" or "Dexium"
@@ -18328,7 +18362,10 @@ Main = (function()
 		
 		local infoDexIntro, isInfoCD
 		
-		openButton.MainFrame.BottomFrame.Settings.Visible = false -- hide it for now
+		openButton.MainFrame.BottomFrame.Settings.Visible = true
+		openButton.MainFrame.BottomFrame.Settings.MouseButton1Click:Connect(function()
+			Main.OpenSettings()
+		end)
 		
 		openButton.MainFrame.BottomFrame.Information.MouseButton1Click:Connect(function()
 			local duration = 1
@@ -18386,7 +18423,8 @@ Main = (function()
 						end
 					end)
 				end)
-			else if cptsOnMouseClick ~= nil then cptsOnMouseClick:Disconnect() cptsOnMouseClick = nil end end
+				Main.ClickPartConnection = cptsOnMouseClick
+			else if cptsOnMouseClick ~= nil then cptsOnMouseClick:Disconnect() cptsOnMouseClick = nil Main.ClickPartConnection = nil end end
 		end})
 
 		Main.CreateApp({Name = "Notepad", IconMap = Main.LargeIcons, Icon = "Script_Viewer", Window = ScriptViewer.Window})
@@ -18409,6 +18447,136 @@ Main = (function()
 
 
 		Lib.ShowGui(gui)
+	end
+
+	Main.OpenSettings = function()
+		if Main.Unloaded then return end
+
+		if Main.SettingsWindow and not Main.SettingsWindow.Closed then
+			Main.SettingsWindow:Show()
+			return
+		end
+
+		local window = Lib.Window.new()
+		window:SetTitle("Settings")
+		window:Resize(420,300)
+		Main.SettingsWindow = window
+
+		local content = window.GuiElems.Content
+
+		local function label(text,y,height,size,color)
+			local entry = Lib.Label.new()
+			entry.Gui.Parent = content
+			entry.Gui.Position = UDim2.new(0,10,0,y)
+			entry.Gui.Size = UDim2.new(1,-20,0,height)
+			entry.Gui.TextSize = size or 13
+			entry.Gui.TextColor3 = color or Settings.Theme.Text
+			entry.Gui.Text = text
+			return entry
+		end
+
+		label("ABOUT",6,14,11,Color3.fromRGB(148,148,148))
+		label(("Dexium %s on %s"):format(Main.Version,Main.Executor or "this executor"),24,18)
+		label(("Core access: %s      Modules: %d"):format(Main.Elevated and "yes" or "no",#Main.ModuleList),44,16,12,Color3.fromRGB(160,160,160))
+
+		label("UNLOAD",78,14,11,Color3.fromRGB(148,148,148))
+
+		local note = label("Closes every Dexium window, stops the background loops and puts the remote hook back. The game keeps running, so run the newer file to load it again.",96,44,12,Color3.fromRGB(160,160,160))
+		note.Gui.TextWrapped = true
+		note.Gui.TextYAlignment = Enum.TextYAlignment.Top
+
+		local status = label("",146,18,12,Color3.fromRGB(160,160,160))
+
+		local unloadButton = Lib.Button.new()
+		unloadButton.Gui.Parent = content
+		unloadButton.Gui.Position = UDim2.new(0,10,0,172)
+		unloadButton.Gui.Size = UDim2.new(1,-20,0,28)
+		unloadButton.Gui.TextSize = 13
+		unloadButton.Gui.Text = "Unload Dexium"
+
+		local armed = false
+		local armedAt = 0
+
+		local function resetArm()
+			armed = false
+			if Main.Unloaded then return end
+			unloadButton.Gui.Text = "Unload Dexium"
+			unloadButton.Gui.TextColor3 = Settings.Theme.Text
+			status.Gui.Text = ""
+		end
+
+		unloadButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+
+			if not armed then
+				armed = true
+				armedAt = os.clock()
+				unloadButton.Gui.Text = "Click again to unload everything"
+				unloadButton.Gui.TextColor3 = Color3.fromRGB(235,140,140)
+				status.Gui.Text = "Confirm within 5 seconds, the game stays open."
+
+				local stamp = armedAt
+				task.delay(5,function()
+					if armed and armedAt == stamp then resetArm() end
+				end)
+			else
+				Main.Unload()
+			end
+		end)
+
+		label("Settings live in DexPlusPlusSettings.json, so a reload keeps your theme.",212,16,11,Color3.fromRGB(130,130,130))
+
+		window:Show()
+	end
+
+	Main.Unload = function()
+		if Main.Unloading then return end
+		Main.Unloading = true
+		Main.Unloaded = true
+
+		-- stop the polling loops first, their windows are about to disappear
+		pcall(function()
+			if Apps.ClickFire and Apps.ClickFire.SetLoop then Apps.ClickFire.SetLoop(false) end
+		end)
+		pcall(function()
+			if Apps.ModelViewer then Apps.ModelViewer.AutoRefresh = false end
+		end)
+		pcall(function()
+			if Apps.RemoteSpy and Apps.RemoteSpy.Unload then Apps.RemoteSpy.Unload() end
+		end)
+
+		if Main.MainGuiMouseEvent then
+			pcall(function() Main.MainGuiMouseEvent:Disconnect() end)
+			Main.MainGuiMouseEvent = nil
+		end
+
+		if Main.ClickPartConnection then
+			pcall(function() Main.ClickPartConnection:Disconnect() end)
+			Main.ClickPartConnection = nil
+		end
+
+		for gui in pairs(Main.CreatedGuis) do
+			pcall(function() gui:Destroy() end)
+		end
+
+		Main.CreatedGuis = {}
+		Main.MainGui = nil
+		Main.AppsFrame = nil
+		Main.AppsContainer = nil
+		Main.AppTemplate = nil
+		Main.SettingsWindow = nil
+		Main.MenuApps = {}
+
+		for name,value in pairs(Main.OwnedGlobals) do
+			pcall(function()
+				local holder = (getgenv and getgenv()) or _G
+				if holder and holder[name] == value then holder[name] = nil end
+			end)
+		end
+
+		Main.OwnedGlobals = {}
+
+		print("[Dexium] Unloaded, the game is untouched. Run the new file to load it again.")
 	end
 
 	Main.SetupFilesystem = function()
