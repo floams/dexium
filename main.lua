@@ -18582,12 +18582,18 @@ local function main()
 				end
 
 				if ClickFire.Loop and generation == loopGen then
-					setStatus(("Loop %d: fired %d/%d, next in %.1fs"):format(pass,fired,total,ClickFire.LoopInterval))
+					-- count the wait down on screen instead of printing one number
+					local started = os.clock()
+					local remaining = ClickFire.LoopInterval
 
-					local waited = 0
-					while ClickFire.Loop and generation == loopGen and waited < ClickFire.LoopInterval do
+					setStatus(("Loop %d: fired %d/%d, next in %.1fs"):format(pass,fired,total,remaining))
+
+					while ClickFire.Loop and generation == loopGen and remaining > 0 do
 						task.wait(0.1)
-						waited = waited + 0.1
+						if not ClickFire.Loop or generation ~= loopGen then break end
+
+						remaining = math.max(ClickFire.LoopInterval - (os.clock() - started),0)
+						setStatus(("Loop %d: fired %d/%d, next in %.1fs"):format(pass,fired,total,remaining))
 					end
 				end
 			end
@@ -19216,7 +19222,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.37" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.38" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
