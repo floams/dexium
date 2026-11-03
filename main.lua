@@ -17187,7 +17187,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.26" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.27" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
@@ -18638,8 +18638,11 @@ Main = (function()
 	end
 
 	Main.CheckVersion = function()
+		if Main.Unloaded then return end
+
 		task.spawn(function()
-			local raw = Main.HttpGet(Main.VersionUrl)
+			-- the query string keeps a cached copy from hiding a newer version
+			local raw = Main.HttpGet(Main.VersionUrl .. "?cb=" .. tostring(os.time()))
 			local latest = raw and raw:match("(%d+%.%d+)")
 
 			if not latest then
@@ -18660,6 +18663,10 @@ Main = (function()
 			Main.LatestVersion = latest
 			Main.Outdated = Main.IsNewer(latest,Main.Version)
 			Main.RefreshVersionDisplay()
+
+			if latest ~= Main.Version then
+				warn(("Dexium version check: read %s, local %s"):format(latest,Main.Version))
+			end
 
 			if Main.Outdated and not Main.OutdatedNotified then
 				Main.OutdatedNotified = true
@@ -18710,6 +18717,30 @@ Main = (function()
 		})
 		versionButton.Parent = content
 		Main.SettingsVersionButton = versionButton
+
+		local recheck = createSimple("TextButton",{
+			AutoButtonColor = false,
+			BackgroundTransparency = 1,
+			Font = Enum.Font.SourceSans,
+			Name = "Recheck",
+			Position = UDim2.new(1,-96,0,24),
+			Size = UDim2.new(0,68,0,18),
+			Text = "check again",
+			TextColor3 = Color3.fromRGB(132,132,132),
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Right
+		})
+		recheck.Parent = content
+		recheck.MouseButton1Click:Connect(function()
+			if Main.Unloaded then return end
+
+			recheck.Text = "checking..."
+			pcall(Main.CheckVersion)
+
+			task.delay(2,function()
+				if recheck.Parent then recheck.Text = "check again" end
+			end)
+		end)
 		label("Creator: floams",42,16,12,Color3.fromRGB(160,160,160))
 		label("Executor: " .. (Main.Executor or "unknown"),60,16,12,Color3.fromRGB(160,160,160))
 
@@ -18722,6 +18753,7 @@ Main = (function()
 		local status = label("",156,18,12,Color3.fromRGB(160,160,160))
 
 		Main.RefreshVersionDisplay()
+		task.spawn(function() pcall(Main.CheckVersion) end)
 
 		versionButton.MouseButton1Click:Connect(function()
 			if Main.Unloaded then return end
