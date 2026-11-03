@@ -15762,19 +15762,13 @@ local function main()
 		local args = splitArgs(argsBox.Text)
 		local lines = {}
 
-		lines[#lines+1] = ("-- %s · %s"):format(log.className,log.method)
-		if call and call.caller then
-			lines[#lines+1] = "-- called from " .. tostring(call.caller)
-		end
-		if call then
-			lines[#lines+1] = ("-- this call ran at %s, %d calls logged"):format(tostring(call.time),log.count)
-		else
-			lines[#lines+1] = ("-- %d calls logged"):format(log.count)
-		end
-
+		lines[#lines+1] = "-- copied remote from dexium"
+		lines[#lines+1] = ("-- %s :: %s"):format(
+			tostring(call and call.caller or logPath(log)),
+			tostring(call and call.time or os.date("%H:%M:%S"))
+		)
 		lines[#lines+1] = ""
 		lines[#lines+1] = ("local remote = %s"):format(logPath(log))
-		lines[#lines+1] = ""
 
 		local invoke = (log.method == "InvokeServer")
 
