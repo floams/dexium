@@ -17187,9 +17187,10 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.23" -- bumped by 0.01 with every update
+	Main.Version = "2.24" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
+	-- must answer without a login: a private repo returns 404 inside the game
 	Main.VersionUrl = "https://raw.githubusercontent.com/floams/dexium/main/version.txt"
 	Main.SourceUrl = "https://raw.githubusercontent.com/floams/dexium/main/main.lua"
 	Main.LatestVersion = nil
@@ -18470,7 +18471,9 @@ Main = (function()
 		local req = env.request or request or http_request
 		if req then
 			local ok,res = pcall(req,{Url = url,Method = "GET"})
-			if ok and type(res) == "table" and res.Body then return res.Body end
+			if ok and type(res) == "table" and res.Body and (res.StatusCode == nil or res.StatusCode == 200) then
+				return res.Body
+			end
 		end
 
 		return nil
@@ -18504,6 +18507,8 @@ Main = (function()
 		local ok = pcall(function()
 			if Main.Outdated and Main.LatestVersion then
 				button.Text = ("Version: %s <font color=\"#e88c8c\"><b>[OUTDATED!]</b></font>"):format(Main.Version)
+			elseif Main.VersionChecked then
+				button.Text = ("Version: %s <font color=\"#8a8a8a\">could not check</font>"):format(Main.Version)
 			else
 				button.Text = ("Version: %s"):format(Main.Version)
 			end
