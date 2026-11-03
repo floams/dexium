@@ -16051,7 +16051,7 @@ local function main()
 	local distance = 11
 	local dragging, hovering, lastPos = false, false, Vector2.new()
 	local spectating
-	local tracerAnchor
+	local tracerGui
 	local refreshRows, syncButtons, unwatchPlayer
 
 	local function accent()
@@ -16100,7 +16100,7 @@ local function main()
 		local data = active[player]
 		if not data then return end
 
-		for _,key in pairs({"highlight","tag","line"}) do
+		for _,key in pairs({"highlight","tag","lineGui"}) do
 			local inst = data[key]
 			if typeof(inst) == "Instance" then
 				pcall(function() inst:Destroy() end)
@@ -16110,30 +16110,25 @@ local function main()
 		active[player] = nil
 	end
 
-	-- an invisible part at the camera is the origin every tracer starts from
-	local function ensureTracerAnchor()
-		if tracerAnchor and tracerAnchor.Parent then return tracerAnchor end
+	-- tracers are screen space lines in their own overlay, so nothing in the map
+	-- can hide them and the maths never depends on an adornment's orientation
+	local function ensureTracerGui()
+		if tracerGui and tracerGui.Parent then return tracerGui end
 
-		local folder = Workspace:FindFirstChild("DexiumPlayerTools")
-		if not folder then
-			folder = Instance.new("Folder")
-			folder.Name = "DexiumPlayerTools"
-			folder.Parent = Workspace
-		end
+		local parent = plr:FindFirstChild("PlayerGui")
+		pcall(function()
+			local hui = env.gethui and env.gethui()
+			if typeof(hui) == "Instance" then parent = hui end
+		end)
+		if not parent then return nil end
 
-		local part = Instance.new("Part")
-		part.Name = "CameraAnchor"
-		part.Anchored = true
-		part.CanCollide = false
-		part.CanQuery = false
-		part.CanTouch = false
-		part.Massless = true
-		part.Size = Vector3.new(0.05,0.05,0.05)
-		part.Transparency = 1
-		part.Parent = folder
-		tracerAnchor = part
+		tracerGui = Instance.new("ScreenGui")
+		tracerGui.DisplayOrder = Main.DisplayOrders.Core
+		tracerGui.Name = "DexiumTracers"
+		tracerGui.ResetOnSpawn = false
+		tracerGui.Parent = parent
 
-		return part
+		return tracerGui
 	end
 
 	local function refreshPlayer(player)
@@ -16224,35 +16219,35 @@ local function main()
 			data.tag = nil
 		end
 
-		-- tracer from the middle of the screen to their root
+		-- tracer, a line across the screen from the bottom edge to their root
 		if state.tracer then
-			ensureTracerAnchor()
+			local gui = ensureTracerGui()
 
-			local line = data.line
-			if not (line and line.Parent) then
-				line = Instance.new("LineHandleAdornment")
-				line.Adornee = tracerAnchor
-				line.AlwaysOnTop = true
-				line.Color3 = color
-				line.Length = 0
-				line.Thickness = 1.5
-				line.Parent = tracerAnchor
-				data.line = line
+			if gui then
+				local line = data.lineGui
+				if not (line and line.Parent) then
+					line = createSimple("Frame",{
+						AnchorPoint = Vector2.new(0,0.5),
+						BackgroundColor3 = color,
+						BorderSizePixel = 0,
+						Name = player.Name,
+						Size = UDim2.fromOffset(0,2),
+						Visible = false
+					})
+					line.Parent = gui
+					data.lineGui = line
+				end
+				line.BackgroundColor3 = color
 			end
-			line.Color3 = color
-		elseif data.line then
-			pcall(function() data.line:Destroy() end)
-			data.line = nil
+		elseif data.lineGui then
+			pcall(function() data.lineGui:Destroy() end)
+			data.lineGui = nil
 		end
 	end
 
 	local function updateEsp()
 		local camera = Workspace.CurrentCamera
 		if not camera then return end
-
-		if tracerAnchor and tracerAnchor.Parent then
-			tracerAnchor.CFrame = camera.CFrame
-		end
 
 		local now = os.clock()
 		local refreshText = now - (PlayerTools.LastTextUpdate or 0) > 0.2
@@ -16276,12 +16271,25 @@ local function main()
 					end
 				end
 
-				if data.line and data.line.Parent then
-					local delta = root.Position - camera.CFrame.Position
-					local length = delta.Magnitude
-					if length > 0.05 then
-						data.line.Length = length
-						data.line.CFrame = CFrame.lookAt(Vector3.zero,delta) * CFrame.Angles(0,math.rad(90),0)
+				if data.lineGui and data.lineGui.Parent then
+					local screen, onScreen = camera:WorldToViewportPoint(root.Position)
+					local viewportSize = camera.ViewportSize
+
+					if onScreen and screen.Z > 0 then
+						local originX, originY = viewportSize.X * 0.5, viewportSize.Y
+						local deltaX, deltaY = screen.X - originX, screen.Y - originY
+						local length = math.sqrt(deltaX * deltaX + deltaY * deltaY)
+
+						if length > 2 then
+							data.lineGui.Position = UDim2.fromOffset(originX,originY)
+							data.lineGui.Size = UDim2.fromOffset(length,2)
+							data.lineGui.Rotation = math.deg(math.atan2(deltaY,deltaX))
+							data.lineGui.Visible = true
+						else
+							data.lineGui.Visible = false
+						end
+					else
+						data.lineGui.Visible = false
 					end
 				end
 			end
@@ -16458,10 +16466,19 @@ local function main()
 
 		if not player then
 			spectating = nil
-			local humanoid = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+
+			local character = plr.Character
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			local subject = humanoid or (character and character:FindFirstChild("HumanoidRootPart"))
+
 			camera.CameraType = Enum.CameraType.Custom
-			camera.CameraSubject = humanoid
-			setStatus("Back on your own camera.")
+			if subject then
+				pcall(function() camera.CameraSubject = subject end)
+			else
+				pcall(function() camera.CameraSubject = nil end)
+			end
+
+			setStatus(subject and "Back on your own camera." or "You are not spawned in, released the camera.")
 			syncButtons()
 			return
 		end
@@ -16479,16 +16496,35 @@ local function main()
 		syncButtons()
 	end
 
+	-- executors disagree about the name of the clipboard function and none of
+	-- them report a failure, so try each one and show the link when all miss
 	local function copyProfile(player)
 		local link = "https://www.roblox.com/users/" .. tostring(player.UserId) .. "/profile"
-		local copy = env.setclipboard or setclipboard
+		local writers = {writeclipboard,setclipboard,env.setclipboard,toclipboard,syn and syn.setclipboard}
 
-		if copy then
-			pcall(copy,link)
-			setStatus("Copied " .. player.Name .. "'s profile link.")
-		else
-			setStatus("No clipboard here, the userId is " .. tostring(player.UserId))
+		local copied = false
+		for _,write in pairs(writers) do
+			if typeof(write) == "function" and pcall(write,link) then
+				copied = true
+				break
+			end
 		end
+
+		if not copied then
+			setStatus("No clipboard here, " .. player.Name .. " is " .. link)
+			return
+		end
+
+		local reader = getclipboard or env.getclipboard or (syn and syn.getclipboard)
+		if typeof(reader) == "function" then
+			local ok, text = pcall(reader)
+			if ok and text ~= link then
+				setStatus("Clipboard kept something else, " .. player.Name .. " is " .. link)
+				return
+			end
+		end
+
+		setStatus("Copied " .. player.Name .. "'s profile link, paste it in your browser.")
 	end
 
 	refreshRows = function()
@@ -16950,7 +16986,11 @@ local function main()
 		spectateButton.OnClick:Connect(function()
 			if Main.Unloaded then return end
 			if not selected then setStatus("Pick a player first.") return end
-			setSpectate(spectating == selected and nil or selected)
+			if spectating == selected then
+				setSpectate(nil)
+			else
+				setSpectate(selected)
+			end
 		end)
 
 		profileButton.OnClick:Connect(function()
@@ -16999,13 +17039,9 @@ local function main()
 			spectating = nil
 		end
 
-		if tracerAnchor then
-			local folder = tracerAnchor.Parent
-			pcall(function() tracerAnchor:Destroy() end)
-			tracerAnchor = nil
-			if folder and folder:IsA("Folder") and #folder:GetChildren() == 0 then
-				pcall(function() folder:Destroy() end)
-			end
+		if tracerGui then
+			pcall(function() tracerGui:Destroy() end)
+			tracerGui = nil
 		end
 
 		clearAvatar()
@@ -19180,7 +19216,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.36" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.37" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
