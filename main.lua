@@ -15027,6 +15027,1042 @@ end
 
 return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end,
+["PlayerTools"] = function()
+--[[
+	Player Tools Module
+
+	Everyone in the server in one list. Pick somebody and their avatar loads in a
+	3D preview you can spin and zoom, turn on chams, nametags and tracers so they
+	stay visible across the map, jump next to them or watch them through their
+	camera
+]]
+
+-- Common Locals
+local Main,Lib,Apps,Settings -- Main Containers
+local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
+local API,RMD,env,service,plr,create,createSimple -- Main Locals
+
+local function initDeps(data)
+	Main = data.Main
+	Lib = data.Lib
+	Apps = data.Apps
+	Settings = data.Settings
+
+	API = data.API
+	RMD = data.RMD
+	env = data.env
+	service = data.service
+	plr = data.plr
+	create = data.create
+	createSimple = data.createSimple
+end
+
+local function initAfterMain()
+	Explorer = Apps.Explorer
+end
+
+local function main()
+	local PlayerTools = {AutoRotate = true}
+
+	local Players = service.Players
+	local RunService = service.RunService
+	local Workspace = service.Workspace
+
+	local COLORS = {
+		{Name = "red", Color = Color3.fromRGB(255,90,90)},
+		{Name = "green", Color = Color3.fromRGB(105,220,125)},
+		{Name = "cyan", Color = Color3.fromRGB(95,200,235)},
+		{Name = "yellow", Color = Color3.fromRGB(235,205,95)},
+		{Name = "violet", Color = Color3.fromRGB(190,140,235)},
+		{Name = "white", Color = Color3.fromRGB(240,240,240)}
+	}
+
+	local window, listFrame, statusLabel, viewport
+	local detailName, detailInfo
+	local chamsButton, tagButton, tracerButton, teleportButton, spectateButton
+	local swatches = {}
+	local rows = {}
+
+	local selected
+	local colorIndex = 1
+	local states, active = {}, {} -- per player toggles, per player game instances
+	local playerConnections, connections = {}, {}
+
+	local avatarToken = 0
+	local avatarModel, avatarCamera, avatarSize = nil, nil, 5
+	local rotationX, rotationY = -0.15, 0.7
+	local distance = 11
+	local dragging, hovering, lastPos = false, false, Vector2.new()
+	local spectating
+	local tracerAnchor
+	local refreshRows, syncButtons, unwatchPlayer
+
+	local function accent()
+		return (COLORS[colorIndex] or COLORS[1]).Color
+	end
+
+	local function setStatus(text)
+		if statusLabel then
+			statusLabel.Gui.Text = text
+		end
+	end
+
+	local function stateOf(player)
+		local state = states[player]
+		if not state then
+			state = {chams = false, tag = false, tracer = false}
+			states[player] = state
+		end
+		return state
+	end
+
+	local function characterOf(player)
+		local character = player and player.Character
+		if not character then return nil end
+
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		local root = character:FindFirstChild("HumanoidRootPart")
+		if not humanoid or not root then return nil end
+		if humanoid.Health <= 0 then return nil end
+
+		return character, humanoid, root
+	end
+
+	local function describeState(player)
+		local state = stateOf(player)
+		local parts = {}
+		if state.chams then parts[#parts+1] = "chams" end
+		if state.tag then parts[#parts+1] = "tag" end
+		if state.tracer then parts[#parts+1] = "tracer" end
+		if #parts == 0 then return "no esp" end
+		return table.concat(parts," + ")
+	end
+
+	-- only ever removes what we added, never the character itself
+	local function clearActive(player)
+		local data = active[player]
+		if not data then return end
+
+		for _,key in pairs({"highlight","tag","line"}) do
+			local inst = data[key]
+			if typeof(inst) == "Instance" then
+				pcall(function() inst:Destroy() end)
+			end
+		end
+
+		active[player] = nil
+	end
+
+	-- an invisible part at the camera is the origin every tracer starts from
+	local function ensureTracerAnchor()
+		if tracerAnchor and tracerAnchor.Parent then return tracerAnchor end
+
+		local folder = Workspace:FindFirstChild("DexiumPlayerTools")
+		if not folder then
+			folder = Instance.new("Folder")
+			folder.Name = "DexiumPlayerTools"
+			folder.Parent = Workspace
+		end
+
+		local part = Instance.new("Part")
+		part.Name = "CameraAnchor"
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Massless = true
+		part.Size = Vector3.new(0.05,0.05,0.05)
+		part.Transparency = 1
+		part.Parent = folder
+		tracerAnchor = part
+
+		return part
+	end
+
+	local function refreshPlayer(player)
+		local state = stateOf(player)
+		local character = characterOf(player)
+		local data = active[player]
+
+		if not character or (not state.chams and not state.tag and not state.tracer) then
+			clearActive(player)
+			return
+		end
+
+		if data and data.character ~= character then
+			clearActive(player)
+			data = nil
+		end
+
+		if not data then
+			data = {character = character}
+			active[player] = data
+		end
+
+		local color = accent()
+
+		-- chams, drawn through walls so the highlight survives any distance
+		if state.chams then
+			local highlight = data.highlight
+			if not (highlight and highlight.Parent) then
+				highlight = Instance.new("Highlight")
+				highlight.Name = "DexiumChams"
+				highlight.Adornee = character
+				highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+				highlight.FillTransparency = 0.5
+				highlight.OutlineTransparency = 0
+				highlight.Parent = character
+				data.highlight = highlight
+			end
+			highlight.FillColor = color
+			highlight.OutlineColor = color
+		elseif data.highlight then
+			pcall(function() data.highlight:Destroy() end)
+			data.highlight = nil
+		end
+
+		-- nametag with distance and health, sized in pixels so it stays readable
+		if state.tag then
+			local head = character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart")
+			if head then
+				local tag = data.tag
+				if not (tag and tag.Parent) then
+					tag = createSimple("BillboardGui",{
+						AlwaysOnTop = true,
+						Enabled = true,
+						LightInfluence = 0,
+						MaxDistance = 5000,
+						Name = "DexiumTag",
+						ResetOnSpawn = false,
+						Size = UDim2.new(0,160,0,34),
+						StudsOffset = Vector3.new(0,2.4,0)
+					})
+
+					local info = createSimple("TextLabel",{
+						BackgroundTransparency = 1,
+						Font = Enum.Font.SourceSansBold,
+						Name = "Info",
+						Size = UDim2.new(1,0,1,0),
+						Text = player.Name,
+						TextColor3 = color,
+						TextSize = 13,
+						TextStrokeColor3 = Color3.new(0,0,0),
+						TextStrokeTransparency = 0.4,
+						TextXAlignment = Enum.TextXAlignment.Center,
+						TextYAlignment = Enum.TextYAlignment.Center
+					})
+					info.Parent = tag
+
+					tag.Parent = head
+					data.tag = tag
+				elseif tag.Parent ~= head then
+					tag.Parent = head
+				end
+
+				local info = tag:FindFirstChild("Info")
+				if info then info.TextColor3 = color end
+			end
+		elseif data.tag then
+			pcall(function() data.tag:Destroy() end)
+			data.tag = nil
+		end
+
+		-- tracer from the middle of the screen to their root
+		if state.tracer then
+			ensureTracerAnchor()
+
+			local line = data.line
+			if not (line and line.Parent) then
+				line = Instance.new("LineHandleAdornment")
+				line.Adornee = tracerAnchor
+				line.AlwaysOnTop = true
+				line.Color3 = color
+				line.Length = 0
+				line.Thickness = 1.5
+				line.Parent = tracerAnchor
+				data.line = line
+			end
+			line.Color3 = color
+		elseif data.line then
+			pcall(function() data.line:Destroy() end)
+			data.line = nil
+		end
+	end
+
+	local function updateEsp()
+		local camera = Workspace.CurrentCamera
+		if not camera then return end
+
+		if tracerAnchor and tracerAnchor.Parent then
+			tracerAnchor.CFrame = camera.CFrame
+		end
+
+		local now = os.clock()
+		local refreshText = now - (PlayerTools.LastTextUpdate or 0) > 0.2
+		if refreshText then PlayerTools.LastTextUpdate = now end
+
+		for player, data in pairs(active) do
+			local character, humanoid, root = characterOf(player)
+
+			if not character then
+				-- they died or left, rebuild once they are back
+				if refreshText then
+					clearActive(player)
+					refreshPlayer(player)
+				end
+			else
+				if data.tag and data.tag.Parent and refreshText then
+					local info = data.tag:FindFirstChild("Info")
+					if info then
+						local away = math.floor((root.Position - camera.CFrame.Position).Magnitude)
+						info.Text = ("%s  [%d]\n%d hp"):format(player.Name,away,math.floor(humanoid.Health))
+					end
+				end
+
+				if data.line and data.line.Parent then
+					local delta = root.Position - camera.CFrame.Position
+					local length = delta.Magnitude
+					if length > 0.05 then
+						data.line.Length = length
+						data.line.CFrame = CFrame.lookAt(Vector3.zero,delta) * CFrame.Angles(0,math.rad(90),0)
+					end
+				end
+			end
+		end
+
+		-- keep watching the same player after they respawn
+		if spectating then
+			local _, humanoid = characterOf(spectating)
+			if humanoid and camera.CameraSubject ~= humanoid then
+				camera.CameraType = Enum.CameraType.Custom
+				camera.CameraSubject = humanoid
+			end
+		end
+	end
+
+	local function updateAvatarCamera()
+		if not (avatarCamera and avatarModel and viewport) then return end
+
+		local pivot = avatarModel.PrimaryPart
+		if not pivot then return end
+
+		if not dragging and PlayerTools.AutoRotate then
+			rotationY += 0.006
+		end
+
+		local center = pivot.Position
+		local rotation = CFrame.Angles(0,rotationY,0) * CFrame.Angles(rotationX,0,0)
+		local position = CFrame.new(center) * rotation * CFrame.new(0,0,distance)
+
+		avatarCamera.CFrame = CFrame.lookAt(position.Position,center)
+	end
+	local function clearAvatar()
+		avatarModel = nil
+		avatarCamera = nil
+		if viewport then
+			pcall(function() viewport:ClearAllChildren() end)
+		end
+	end
+
+	-- the appearance endpoint is the cheapest way to get a full avatar, the
+	-- description route is the documented fallback and the live character is last
+	local function loadAvatar(player)
+		local ok, model = pcall(function()
+			return Players:GetCharacterAppearanceAsync(player.UserId)
+		end)
+		if ok and typeof(model) == "Instance" then return model end
+
+		ok, model = pcall(function()
+			local description = Players:GetHumanoidDescriptionFromUserId(player.UserId)
+			return Players:CreateHumanoidModelFromDescriptionAsync(description,Enum.HumanoidRigType.R15)
+		end)
+		if ok and typeof(model) == "Instance" then return model end
+
+		local character = player.Character
+		if character then
+			local cloned, clone = pcall(function() return character:Clone() end)
+			if cloned and clone then return clone end
+		end
+
+		return nil
+	end
+
+	local function attachAvatar(model)
+		for _,descendant in pairs(model:GetDescendants()) do
+			if descendant:IsA("BasePart") then
+				descendant.Anchored = true
+				descendant.CanCollide = false
+				descendant.Massless = true
+			elseif descendant:IsA("Script") or descendant:IsA("LocalScript") or descendant:IsA("BillboardGui") then
+				pcall(function() descendant:Destroy() end)
+			end
+		end
+
+		local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+		if not root then
+			for _,descendant in pairs(model:GetDescendants()) do
+				if descendant:IsA("BasePart") then
+					root = descendant
+					break
+				end
+			end
+		end
+
+		if not root then
+			pcall(function() model:Destroy() end)
+			return false
+		end
+
+		model.PrimaryPart = root
+
+		local boxCF, boxSize
+		pcall(function() boxCF, boxSize = model:GetBoundingBox() end)
+		if boxCF then
+			pcall(function() model:SetPrimaryPartCFrame(CFrame.new(-boxCF.Position)) end)
+		end
+
+		avatarSize = (boxSize and boxSize.Y) or 5
+
+		model.Parent = viewport
+		avatarModel = model
+
+		avatarCamera = Instance.new("Camera")
+		avatarCamera.FieldOfView = 50
+		avatarCamera.Parent = viewport
+		viewport.CurrentCamera = avatarCamera
+
+		rotationX, rotationY = -0.1, 0.7
+		distance = math.clamp(avatarSize * 2.3,4,40)
+
+		return true
+	end
+
+	local function showAvatar(player)
+		if not viewport then return end
+
+		selected = player
+		refreshRows()
+		syncButtons()
+
+		detailName.Gui.Text = player.Name
+		detailInfo.Gui.Text = "loading avatar..."
+
+		clearAvatar()
+		avatarToken = avatarToken + 1
+		local token = avatarToken
+
+		task.spawn(function()
+			local model = loadAvatar(player)
+
+			if token ~= avatarToken or Main.Unloaded then
+				if model then pcall(function() model:Destroy() end) end
+				return
+			end
+
+			if not model then
+				detailInfo.Gui.Text = "avatar unavailable for this player"
+				return
+			end
+
+			if not attachAvatar(model) then
+				detailInfo.Gui.Text = "avatar unavailable for this player"
+				return
+			end
+
+			local shown = player.DisplayName or player.Name
+			detailInfo.Gui.Text = ("userId %d  |  %s  |  drag to spin, scroll to zoom"):format(player.UserId,shown)
+		end)
+	end
+
+	local function teleportTo(player)
+		local targetRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if not targetRoot then
+			setStatus("No character to move to, try again once they spawn in.")
+			return
+		end
+
+		local character = plr.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+
+		if root then
+			root.CFrame = targetRoot.CFrame * CFrame.new(0,0,3)
+			setStatus(("Moved next to %s, the game may pull you back."):format(player.Name))
+		elseif character and character.PivotTo then
+			pcall(function() character:PivotTo(targetRoot.CFrame * CFrame.new(0,0,3)) end)
+			setStatus(("Moved next to %s, the game may pull you back."):format(player.Name))
+		else
+			setStatus("Your character is not spawned in yet.")
+		end
+	end
+
+	local function setSpectate(player)
+		local camera = Workspace.CurrentCamera
+		if not camera then return end
+
+		if not player then
+			spectating = nil
+			local humanoid = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+			camera.CameraType = Enum.CameraType.Custom
+			camera.CameraSubject = humanoid
+			setStatus("Back on your own camera.")
+			syncButtons()
+			return
+		end
+
+		local _, humanoid = characterOf(player)
+		if not humanoid then
+			setStatus(player.Name .. " has no character to watch right now.")
+			return
+		end
+
+		spectating = player
+		camera.CameraType = Enum.CameraType.Custom
+		camera.CameraSubject = humanoid
+		setStatus("Watching " .. player.Name .. ", respawns are followed automatically.")
+		syncButtons()
+	end
+
+	local function copyProfile(player)
+		local link = "https://www.roblox.com/users/" .. tostring(player.UserId) .. "/profile"
+		local copy = env.setclipboard or setclipboard
+
+		if copy then
+			pcall(copy,link)
+			setStatus("Copied " .. player.Name .. "'s profile link.")
+		else
+			setStatus("No clipboard here, the userId is " .. tostring(player.UserId))
+		end
+	end
+
+	refreshRows = function()
+		for _,row in pairs(rows) do
+			pcall(function() row:Destroy() end)
+		end
+		rows = {}
+
+		local list = {}
+		for _,player in pairs(Players:GetPlayers()) do
+			if player ~= plr then list[#list+1] = player end
+		end
+		table.sort(list,function(a,b) return string.lower(a.Name) < string.lower(b.Name) end)
+
+		for index,player in pairs(list) do
+			local isSelected = (selected == player)
+			local state = stateOf(player)
+			local anyOn = state.chams or state.tag or state.tracer
+
+			local row = createSimple("TextButton",{
+				AutoButtonColor = false,
+				BackgroundColor3 = isSelected and Settings.Theme.ListSelection or Settings.Theme.Button,
+				BackgroundTransparency = isSelected and 0 or 1,
+				BorderSizePixel = 0,
+				LayoutOrder = index,
+				Name = player.Name,
+				Size = UDim2.new(1,0,0,32),
+				Text = ""
+			})
+
+			local nameLabel = createSimple("TextLabel",{
+				BackgroundTransparency = 1,
+				Font = Enum.Font.SourceSans,
+				Position = UDim2.new(0,8,0,3),
+				Size = UDim2.new(1,-62,0,14),
+				Text = player.Name,
+				TextColor3 = Settings.Theme.Text,
+				TextSize = 13,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				TextXAlignment = Enum.TextXAlignment.Left
+			})
+			nameLabel.Parent = row
+
+			local summary = createSimple("TextLabel",{
+				BackgroundTransparency = 1,
+				Font = Enum.Font.SourceSans,
+				Position = UDim2.new(0,8,0,16),
+				Size = UDim2.new(1,-62,0,12),
+				Text = describeState(player),
+				TextColor3 = anyOn and accent() or Color3.fromRGB(128,128,128),
+				TextSize = 10,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				TextXAlignment = Enum.TextXAlignment.Left
+			})
+			summary.Parent = row
+
+			local toggle = createSimple("TextButton",{
+				AutoButtonColor = false,
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				Font = Enum.Font.SourceSansBold,
+				AnchorPoint = Vector2.new(1,0.5),
+				Position = UDim2.new(1,-6,0.5,0),
+				Size = UDim2.new(0,44,0,20),
+				Text = anyOn and "esp on" or "esp off",
+				TextColor3 = anyOn and accent() or Color3.fromRGB(110,110,110),
+				TextSize = 10,
+				TextXAlignment = Enum.TextXAlignment.Right
+			})
+			toggle.Parent = row
+
+			row.MouseButton1Click:Connect(function()
+				if Main.Unloaded then return end
+				showAvatar(player)
+			end)
+
+			row.MouseEnter:Connect(function()
+				if selected ~= player then
+					row.BackgroundColor3 = Settings.Theme.ButtonHover
+					row.BackgroundTransparency = 0
+				end
+			end)
+
+			row.MouseLeave:Connect(function()
+				if selected ~= player then
+					row.BackgroundTransparency = 1
+				end
+			end)
+
+			toggle.MouseButton1Click:Connect(function()
+				if Main.Unloaded then return end
+
+				local target = stateOf(player)
+				local turnOn = not (target.chams or target.tag or target.tracer)
+				target.chams,target.tag,target.tracer = turnOn,turnOn,turnOn
+
+				refreshPlayer(player)
+				refreshRows()
+				syncButtons()
+				setStatus(turnOn and ("Chams, tag and tracer on for " .. player.Name) or ("Cleared " .. player.Name))
+			end)
+
+			row.Parent = listFrame
+			rows[#rows+1] = row
+		end
+	end
+
+	syncButtons = function()
+		if not chamsButton then return end
+
+		local state = selected and stateOf(selected)
+		local color = accent()
+
+		chamsButton.Gui.Text = (state and state.chams) and "Chams: on" or "Chams: off"
+		chamsButton.Gui.TextColor3 = (state and state.chams) and color or Settings.Theme.Text
+		tagButton.Gui.Text = (state and state.tag) and "Tag: on" or "Tag: off"
+		tagButton.Gui.TextColor3 = (state and state.tag) and color or Settings.Theme.Text
+		tracerButton.Gui.Text = (state and state.tracer) and "Tracer: on" or "Tracer: off"
+		tracerButton.Gui.TextColor3 = (state and state.tracer) and color or Settings.Theme.Text
+
+		spectateButton.Gui.Text = (selected and spectating == selected) and "Stop watching" or "Spectate"
+		teleportButton.Gui.Text = "Go to player"
+	end
+
+	PlayerTools.Init = function()
+		window = Lib.Window.new()
+		window:SetTitle("Player Tools")
+		window:Resize(560,400)
+		PlayerTools.Window = window
+
+		local content = window.GuiElems.Content
+
+		local heading = Lib.Label.new()
+		heading.Gui.Parent = content
+		heading.Gui.Position = UDim2.new(0,8,0,4)
+		heading.Gui.Size = UDim2.new(0,120,0,16)
+		heading.Gui.Text = "PLAYERS"
+		heading.Gui.TextSize = 11
+		heading.Gui.TextColor3 = Color3.fromRGB(148,148,148)
+
+		local espAll = Lib.Button.new()
+		espAll.Gui.Parent = content
+		espAll.Gui.AnchorPoint = Vector2.new(1,0)
+		espAll.Gui.Position = UDim2.new(0,250,0,2)
+		espAll.Gui.Size = UDim2.new(0,84,0,20)
+		espAll.Gui.TextSize = 12
+		espAll.Gui.Text = "esp all"
+		espAll.OnClick:Connect(function()
+			if Main.Unloaded then return end
+
+			local anyOff = false
+			for _,player in pairs(Players:GetPlayers()) do
+				if player ~= plr then
+					local state = stateOf(player)
+					if not (state.chams or state.tag or state.tracer) then
+						anyOff = true
+						break
+					end
+				end
+			end
+
+			for _,player in pairs(Players:GetPlayers()) do
+				if player ~= plr then
+					local state = stateOf(player)
+					state.chams,state.tag,state.tracer = anyOff,anyOff,anyOff
+					refreshPlayer(player)
+				end
+			end
+
+			refreshRows()
+			setStatus(anyOff and "Chams, tags and tracers on for everyone." or "Cleared every player.")
+		end)
+
+		local listPanel = createSimple("Frame",{
+			BackgroundColor3 = Settings.Theme.Main2,
+			BorderColor3 = Settings.Theme.Outline1,
+			Name = "PlayerList",
+			Position = UDim2.new(0,4,0,26),
+			Size = UDim2.new(0,246,1,-52)
+		})
+		listPanel.Parent = content
+
+		listFrame = createSimple("ScrollingFrame",{
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			BottomImage = "",
+			CanvasSize = UDim2.new(0,0,0,0),
+			Name = "List",
+			Position = UDim2.new(0,4,0,4),
+			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
+			ScrollBarThickness = 6,
+			Size = UDim2.new(1,-8,1,-8),
+			TopImage = ""
+		})
+		listFrame.Parent = listPanel
+
+		local layout = Instance.new("UIListLayout")
+		layout.FillDirection = Enum.FillDirection.Vertical
+		layout.Padding = UDim.new(0,1)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = listFrame
+
+		local detailPanel = createSimple("Frame",{
+			BackgroundColor3 = Settings.Theme.Main2,
+			BorderColor3 = Settings.Theme.Outline1,
+			Name = "PlayerDetail",
+			Position = UDim2.new(0,254,0,26),
+			Size = UDim2.new(1,-258,1,-52)
+		})
+		detailPanel.Parent = content
+
+		detailName = Lib.Label.new()
+		detailName.Gui.Parent = detailPanel
+		detailName.Gui.Position = UDim2.new(0,8,0,4)
+		detailName.Gui.Size = UDim2.new(1,-16,0,16)
+		detailName.Gui.Text = "pick a player"
+		detailName.Gui.TextSize = 13
+		detailName.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+
+		viewport = Instance.new("ViewportFrame")
+		viewport.Ambient = Color3.fromRGB(150,150,150)
+		viewport.BackgroundColor3 = Settings.Theme.Main1
+		viewport.BorderSizePixel = 0
+		viewport.LightColor = Color3.fromRGB(255,255,255)
+		viewport.LightDirection = Vector3.new(-0.4,-1,-0.5)
+		viewport.Name = "Avatar"
+		viewport.Position = UDim2.new(0,8,0,22)
+		viewport.Size = UDim2.new(1,-16,0,176)
+		viewport.Parent = detailPanel
+
+		detailInfo = Lib.Label.new()
+		detailInfo.Gui.Parent = detailPanel
+		detailInfo.Gui.Position = UDim2.new(0,8,0,200)
+		detailInfo.Gui.Size = UDim2.new(1,-16,0,14)
+		detailInfo.Gui.Text = "avatars load from Roblox, about a second each"
+		detailInfo.Gui.TextSize = 11
+		detailInfo.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		detailInfo.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+
+		chamsButton = Lib.Button.new()
+		chamsButton.Gui.Parent = detailPanel
+		chamsButton.Gui.Position = UDim2.new(0,8,0,218)
+		chamsButton.Gui.Size = UDim2.new(0.3333,-8,0,22)
+		chamsButton.Gui.TextSize = 12
+		chamsButton.Gui.Text = "Chams: off"
+
+		tagButton = Lib.Button.new()
+		tagButton.Gui.Parent = detailPanel
+		tagButton.Gui.Position = UDim2.new(0.3333,4,0,218)
+		tagButton.Gui.Size = UDim2.new(0.3333,-8,0,22)
+		tagButton.Gui.TextSize = 12
+		tagButton.Gui.Text = "Tag: off"
+
+		tracerButton = Lib.Button.new()
+		tracerButton.Gui.Parent = detailPanel
+		tracerButton.Gui.Position = UDim2.new(0.6666,0,0,218)
+		tracerButton.Gui.Size = UDim2.new(0.3333,-8,0,22)
+		tracerButton.Gui.TextSize = 12
+		tracerButton.Gui.Text = "Tracer: off"
+
+		teleportButton = Lib.Button.new()
+		teleportButton.Gui.Parent = detailPanel
+		teleportButton.Gui.Position = UDim2.new(0,8,0,248)
+		teleportButton.Gui.Size = UDim2.new(0.4,-10,0,22)
+		teleportButton.Gui.TextSize = 12
+		teleportButton.Gui.Text = "Go to player"
+
+		spectateButton = Lib.Button.new()
+		spectateButton.Gui.Parent = detailPanel
+		spectateButton.Gui.Position = UDim2.new(0.4,0,0,248)
+		spectateButton.Gui.Size = UDim2.new(0.34,-8,0,22)
+		spectateButton.Gui.TextSize = 12
+		spectateButton.Gui.Text = "Spectate"
+
+		local profileButton = Lib.Button.new()
+		profileButton.Gui.Parent = detailPanel
+		profileButton.Gui.Position = UDim2.new(0.74,0,0,248)
+		profileButton.Gui.Size = UDim2.new(0.26,-8,0,22)
+		profileButton.Gui.TextSize = 12
+		profileButton.Gui.Text = "Profile"
+
+		for index,entry in pairs(COLORS) do
+			local swatch = createSimple("TextButton",{
+				AutoButtonColor = false,
+				BackgroundColor3 = entry.Color,
+				BorderSizePixel = 0,
+				Name = entry.Name,
+				Position = UDim2.new(0,8 + (index - 1) * 26,0,278),
+				Size = UDim2.new(0,22,0,22),
+				Text = ""
+			})
+			swatch.Parent = detailPanel
+
+			local stroke = Instance.new("UIStroke")
+			stroke.Color = Settings.Theme.Text
+			stroke.Thickness = 2
+			stroke.Transparency = (index == colorIndex) and 0 or 1
+			stroke.Parent = swatch
+
+			swatches[index] = {button = swatch, stroke = stroke}
+
+			swatch.MouseButton1Click:Connect(function()
+				if Main.Unloaded then return end
+
+				colorIndex = index
+				for i,data in pairs(swatches) do
+					data.stroke.Transparency = (i == colorIndex) and 0 or 1
+				end
+				for player in pairs(active) do
+					refreshPlayer(player)
+				end
+				refreshRows()
+				setStatus("ESP colour: " .. entry.Name)
+			end)
+		end
+
+		statusLabel = Lib.Label.new()
+		statusLabel.Gui.Parent = content
+		statusLabel.Gui.AnchorPoint = Vector2.new(0,1)
+		statusLabel.Gui.Position = UDim2.new(0,4,1,0)
+		statusLabel.Gui.Size = UDim2.new(1,-8,0,16)
+		statusLabel.Gui.Text = "pick someone from the list to load their avatar"
+		statusLabel.Gui.TextSize = 11
+		statusLabel.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		statusLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+
+		-- spin the preview with the mouse, zoom with the wheel over it
+		viewport.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				lastPos = input.Position
+			end
+		end)
+
+		viewport.MouseEnter:Connect(function() hovering = true end)
+		viewport.MouseLeave:Connect(function() hovering = false end)
+
+		viewport.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+			end
+		end)
+
+		viewport.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - lastPos
+				lastPos = input.Position
+
+				rotationY += delta.X * 0.01
+				rotationX = math.clamp(rotationX - delta.Y * 0.01,-1.3,1.3)
+			end
+
+			if input.UserInputType == Enum.UserInputType.MouseWheel and hovering then
+				distance = math.clamp(distance - input.Position.Z * math.max(avatarSize * 0.4,1),2,120)
+			end
+		end)
+
+		unwatchPlayer = function(player)
+			local list = playerConnections[player]
+			if not list then return end
+
+			for _,connection in pairs(list) do
+				pcall(function() connection:Disconnect() end)
+			end
+			playerConnections[player] = nil
+		end
+
+		local function watchPlayer(player)
+			if player == plr or playerConnections[player] then return end
+
+			local list = {}
+			list[#list+1] = player.CharacterAdded:Connect(function()
+				task.wait(0.35)
+				if Main.Unloaded then return end
+				refreshPlayer(player)
+				refreshRows()
+			end)
+			list[#list+1] = player.CharacterRemoving:Connect(function()
+				clearActive(player)
+			end)
+
+			playerConnections[player] = list
+		end
+
+		connections[#connections+1] = Players.PlayerAdded:Connect(function(player)
+			watchPlayer(player)
+			refreshRows()
+			setStatus(player.Name .. " joined.")
+		end)
+
+		connections[#connections+1] = Players.PlayerRemoving:Connect(function(player)
+			unwatchPlayer(player)
+			clearActive(player)
+			states[player] = nil
+
+			if selected == player then
+				selected = nil
+				detailName.Gui.Text = "pick a player"
+				detailInfo.Gui.Text = ""
+				clearAvatar()
+				avatarToken = avatarToken + 1
+			end
+
+			if spectating == player then setSpectate(nil) end
+
+			refreshRows()
+			syncButtons()
+		end)
+
+		connections[#connections+1] = RunService.RenderStepped:Connect(function()
+			if Main.Unloaded then return end
+			updateEsp()
+			updateAvatarCamera()
+		end)
+
+		chamsButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+			if not selected then setStatus("Pick a player first.") return end
+
+			local state = stateOf(selected)
+			state.chams = not state.chams
+			refreshPlayer(selected)
+			refreshRows()
+			syncButtons()
+			setStatus(("Chams %s for %s."):format(state.chams and "on" or "off",selected.Name))
+		end)
+
+		tagButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+			if not selected then setStatus("Pick a player first.") return end
+
+			local state = stateOf(selected)
+			state.tag = not state.tag
+			refreshPlayer(selected)
+			refreshRows()
+			syncButtons()
+			setStatus(("Nametag %s for %s."):format(state.tag and "on" or "off",selected.Name))
+		end)
+
+		tracerButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+			if not selected then setStatus("Pick a player first.") return end
+
+			local state = stateOf(selected)
+			state.tracer = not state.tracer
+			refreshPlayer(selected)
+			refreshRows()
+			syncButtons()
+			setStatus(("Tracer %s for %s."):format(state.tracer and "on" or "off",selected.Name))
+		end)
+
+		teleportButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+			if not selected then setStatus("Pick a player first.") return end
+			teleportTo(selected)
+		end)
+
+		spectateButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+			if not selected then setStatus("Pick a player first.") return end
+			setSpectate(spectating == selected and nil or selected)
+		end)
+
+		profileButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+			if not selected then setStatus("Pick a player first.") return end
+			copyProfile(selected)
+		end)
+
+		for _,player in pairs(Players:GetPlayers()) do
+			watchPlayer(player)
+		end
+
+		refreshRows()
+		syncButtons()
+
+		window.OnActivate:Connect(function()
+			refreshRows()
+			syncButtons()
+		end)
+	end
+
+	PlayerTools.Unload = function()
+		avatarToken = avatarToken + 1
+
+		for player in pairs(active) do
+			clearActive(player)
+		end
+
+		for _,connection in pairs(connections) do
+			pcall(function() connection:Disconnect() end)
+		end
+		connections = {}
+
+		for player in pairs(playerConnections) do
+			if unwatchPlayer then unwatchPlayer(player) end
+		end
+		playerConnections = {}
+
+		if spectating then
+			local camera = Workspace.CurrentCamera
+			local humanoid = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+			if camera then
+				camera.CameraType = Enum.CameraType.Custom
+				camera.CameraSubject = humanoid
+			end
+			spectating = nil
+		end
+
+		if tracerAnchor then
+			local folder = tracerAnchor.Parent
+			pcall(function() tracerAnchor:Destroy() end)
+			tracerAnchor = nil
+			if folder and folder:IsA("Folder") and #folder:GetChildren() == 0 then
+				pcall(function() folder:Destroy() end)
+			end
+		end
+
+		clearAvatar()
+
+		if window then
+			pcall(function() window:Hide() end)
+		end
+	end
+
+	return PlayerTools
+end
+
+return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+end,
 ["RemoteSpy"] = function()
 --[[
 	Remote Spy Module
@@ -17054,7 +18090,7 @@ end
 local isFsSupported = readfile and writefile and isfile and isfolder and listfiles and delfile and delfolder
 
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire, ServerHop, SubplaceBrowser, RemoteSpy--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
+local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire, ServerHop, SubplaceBrowser, RemoteSpy, PlayerTools--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
 local API, RMD
 
 -- Default Settings
@@ -17183,11 +18219,11 @@ end
 Main = (function()
 	local Main = {}
 
-	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire","ServerHop","SubplaceBrowser","RemoteSpy"}
+	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire","ServerHop","SubplaceBrowser","RemoteSpy","PlayerTools"}
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.28" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.29" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
@@ -17431,6 +18467,7 @@ Main = (function()
 		ServerHop = Apps.ServerHop
 		SubplaceBrowser = Apps.SubplaceBrowser
 		RemoteSpy = Apps.RemoteSpy
+		PlayerTools = Apps.PlayerTools
 		Notebook = Apps.Notebook
 		
 		--SecretServicePanel = Apps.SecretServicePanel
@@ -17445,6 +18482,7 @@ Main = (function()
 			ServerHop = ServerHop,
 			SubplaceBrowser = SubplaceBrowser,
 			RemoteSpy = RemoteSpy,
+			PlayerTools = PlayerTools,
 			Notebook = Notebook,
 			
 			--SecretServicePanel = SecretServicePanel,
@@ -18454,6 +19492,8 @@ Main = (function()
 
 		Main.CreateApp({Name = "Remote Spy", IconMap = Explorer.ClassIcons, Icon = "RemoteEvent", Window = RemoteSpy.Window})
 
+		Main.CreateApp({Name = "Player Tools", IconMap = Explorer.ClassIcons, Icon = "Player", Window = PlayerTools.Window})
+
 		--Main.CreateApp({Name = "Secret Service Panel", IconMap = Main.LargeIcons, Icon = "Output", Window = SecretServicePanel.Window})
 
 
@@ -18822,6 +19862,9 @@ Main = (function()
 		pcall(function()
 			if Apps.RemoteSpy and Apps.RemoteSpy.Unload then Apps.RemoteSpy.Unload() end
 		end)
+		pcall(function()
+			if Apps.PlayerTools and Apps.PlayerTools.Unload then Apps.PlayerTools.Unload() end
+		end)
 
 		if Main.MainGuiMouseEvent then
 			pcall(function() Main.MainGuiMouseEvent:Disconnect() end)
@@ -18977,6 +20020,7 @@ Main = (function()
 		ServerHop.Init()
 		SubplaceBrowser.Init()
 		RemoteSpy.Init()
+		PlayerTools.Init()
 		
 		--SecretServicePanel.Init()
 		
