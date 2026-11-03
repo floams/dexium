@@ -15027,6 +15027,786 @@ end
 
 return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end,
+["GearTools"] = function()
+--[[
+	Gear Tools Module
+
+	Every gear you own, in one list. The trick that makes a set possible is
+	parenting the Tool onto your own character: Humanoid:EquipTool puts whatever
+	you were holding back in the backpack, so the guide moves the Tool directly
+	and several gears end up in your hands at once. This is client side, the
+	server still counts those gears as backpack items, so a set can be locked and
+	re-applied, and the list mirrors equips made with the hotbar keys, by the game
+	and after a respawn.
+]]
+
+-- Common Locals
+local Main,Lib,Apps,Settings -- Main Containers
+local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
+local API,RMD,env,service,plr,create,createSimple -- Main Locals
+
+local function initDeps(data)
+	Main = data.Main
+	Lib = data.Lib
+	Apps = data.Apps
+	Settings = data.Settings
+
+	API = data.API
+	RMD = data.RMD
+	env = data.env
+	service = data.service
+	plr = data.plr
+	create = data.create
+	createSimple = data.createSimple
+end
+
+local function initAfterMain()
+	Explorer = Apps.Explorer
+end
+
+local function main()
+	local GearTools = {}
+
+	local Players = service.Players
+	local RunService = service.RunService
+	local HttpService = service.HttpService
+
+	local SETS_PATH = "DexiumExplorer/gearsets.json"
+	local PARENT_TIMEOUT = 0.4
+	local LOCK_INTERVAL = 0.6
+	local SYNC_INTERVAL = 0.5
+
+	local window, listFrame, statusLabel, searchBox, nameBox, setsDrop, heldLabel
+	local equipShownButton, unequipShownButton, lockButton, refreshButton
+	local rows = {}
+	local sets = {}
+	local lock = {running = false, names = nil, gen = 0}
+	local watchers = {}
+	local connections = {}
+	local lastSignature
+	local refreshQueued = false
+	local refreshRows, queueRefresh
+
+	local function setStatus(text)
+		if statusLabel then
+			statusLabel.Gui.Text = text
+		end
+	end
+
+	-- every gear that exists in the backpack or in your hands, hotbar order
+	local function allTools()
+		local out, seen = {}, {}
+
+		local function add(container)
+			if not container then return end
+			for _,child in pairs(container:GetChildren()) do
+				if child:IsA("Tool") and not seen[child] then
+					seen[child] = true
+					out[#out+1] = child
+				end
+			end
+		end
+
+		add(plr:FindFirstChild("Backpack"))
+		if plr.Character then add(plr.Character) end
+		return out
+	end
+
+	local function heldTools()
+		local out = {}
+		local character = plr.Character
+		if character then
+			for _,child in pairs(character:GetChildren()) do
+				if child:IsA("Tool") then out[#out+1] = child end
+			end
+		end
+		return out
+	end
+
+	local function isHeld(tool)
+		return tool.Parent ~= nil and tool.Parent == plr.Character
+	end
+
+	-- the game can move the tool straight back, so give it a moment before
+	-- reporting failure instead of assuming the parent change stuck
+	local function equipTool(tool)
+		local character = plr.Character
+		if not (character and tool and tool.Parent) then return false end
+		if tool.Parent == character then return true end
+
+		pcall(function() tool.Parent = character end)
+
+		local deadline = os.clock() + PARENT_TIMEOUT
+		while tool.Parent ~= character and os.clock() < deadline do
+			task.wait()
+		end
+		return tool.Parent == character
+	end
+
+	local function unequipTool(tool)
+		local backpack = plr:FindFirstChild("Backpack")
+		if not (backpack and tool and tool.Parent) then return false end
+		if tool.Parent == backpack then return true end
+
+		pcall(function() tool.Parent = backpack end)
+
+		local deadline = os.clock() + PARENT_TIMEOUT
+		while tool.Parent ~= backpack and os.clock() < deadline do
+			task.wait()
+		end
+		return tool.Parent == backpack
+	end
+
+	-- saved sets store names, so a set still works after a respawn respawns new
+	-- Tool instances; an exact name match wins over a substring match
+	local function toolsNamed(name)
+		local lower = tostring(name or ""):lower()
+		local exact, partial = {}, {}
+
+		for _,tool in pairs(allTools()) do
+			local toolName = tool.Name:lower()
+			if toolName == lower then
+				exact[#exact+1] = tool
+			elseif lower ~= "" and toolName:find(lower,1,true) then
+				partial[#partial+1] = tool
+			end
+		end
+
+		if #exact > 0 then return exact end
+		return partial
+	end
+
+	local function resolveNames(names)
+		local out, seen = {}, {}
+		for _,name in pairs(names or {}) do
+			for _,tool in pairs(toolsNamed(name)) do
+				if not seen[tool] then
+					seen[tool] = true
+					out[#out+1] = tool
+				end
+			end
+		end
+		return out
+	end
+
+	-- mode "exact" puts away what is not in the set, "add" leaves the rest alone
+	local function applySet(names, mode)
+		local want = resolveNames(names)
+		local wantSet = {}
+
+		for _,tool in pairs(want) do wantSet[tool] = true end
+
+		if mode == "exact" then
+			for _,tool in pairs(heldTools()) do
+				if not wantSet[tool] then unequipTool(tool) end
+			end
+		end
+
+		local equipped = 0
+		for _,tool in pairs(want) do
+			if equipTool(tool) then equipped = equipped + 1 end
+		end
+		return equipped,want
+	end
+
+	local function loadSets()
+		sets = {}
+		if not env.readfile then return end
+
+		local ok, data = pcall(env.readfile,SETS_PATH)
+		if not ok or type(data) ~= "string" or data == "" then return end
+
+		local decoded
+		ok, decoded = pcall(function() return HttpService:JSONDecode(data) end)
+		if not ok or type(decoded) ~= "table" then return end
+
+		for name,list in pairs(decoded) do
+			if type(list) == "table" then
+				local clean = {}
+				for _,entry in pairs(list) do
+					if type(entry) == "string" then clean[#clean+1] = entry end
+				end
+				sets[tostring(name):lower()] = clean
+			end
+		end
+	end
+
+	local function saveSets()
+		if not env.writefile then
+			return false, "this executor has no writefile, sets last for the session only"
+		end
+
+		local function attempt()
+			return pcall(function()
+				env.writefile(SETS_PATH,HttpService:JSONEncode(sets))
+			end)
+		end
+
+		local ok = attempt()
+		if ok then return true end
+
+		-- the settings folder is usually there already, make it if this is a
+		-- fresh install and try once more
+		if env.makefolder then pcall(env.makefolder,"DexiumExplorer") end
+		ok = attempt()
+		if ok then return true end
+
+		return false, "could not write " .. SETS_PATH
+	end
+
+	local function setNameOptions()
+		if not setsDrop then return end
+
+		local names = {}
+		for name in pairs(sets) do names[#names+1] = name end
+		table.sort(names)
+
+		setsDrop:SetOptions(names)
+		if setsDrop.CanBeEmpty then setsDrop.Selected = nil end
+		setsDrop:Update()
+	end
+
+	local function updateHeldLabel()
+		if heldLabel then
+			heldLabel.Gui.Text = ("held %d / %d"):format(#heldTools(),#allTools())
+		end
+	end
+
+	-- a cheap fingerprint of what is in the backpack and in your hands, so the
+	-- sync loop only rebuilds rows when something actually moved
+	local function signatureText()
+		local held, bag = {}, {}
+
+		for _,tool in pairs(heldTools()) do held[#held+1] = tool.Name end
+		local backpack = plr:FindFirstChild("Backpack")
+		if backpack then
+			for _,child in pairs(backpack:GetChildren()) do
+				if child:IsA("Tool") then bag[#bag+1] = child.Name end
+			end
+		end
+
+		table.sort(held)
+		table.sort(bag)
+		return table.concat(held,",") .. "|" .. table.concat(bag,",")
+	end
+	local function shownTools()
+		local query = (searchBox and searchBox:GetText() or ""):lower()
+		local out = {}
+		for _,tool in pairs(allTools()) do
+			if query == "" or tool.Name:lower():find(query,1,true) then
+				out[#out+1] = tool
+			end
+		end
+		table.sort(out,function(a,b) return a.Name:lower() < b.Name:lower() end)
+		return out
+	end
+
+	refreshRows = function()
+		if not listFrame then return end
+
+		for _,row in pairs(rows) do
+			pcall(function() row:Destroy() end)
+		end
+		rows = {}
+
+		local tools = shownTools()
+		local character = plr.Character
+		local indexOf = {}
+		for index,tool in pairs(allTools()) do indexOf[tool] = index end
+
+		for index,tool in pairs(tools) do
+			local held = tool.Parent == character
+
+			local row = createSimple("TextButton",{
+				AutoButtonColor = false,
+				BackgroundColor3 = Settings.Theme.Button,
+				BackgroundTransparency = 1,
+				BorderSizePixel = 0,
+				LayoutOrder = index,
+				Name = tool.Name,
+				Size = UDim2.new(1,0,0,26),
+				Text = ""
+			})
+
+			local nameLabel = createSimple("TextLabel",{
+				BackgroundTransparency = 1,
+				Font = Enum.Font.SourceSans,
+				Position = UDim2.new(0,8,0,2),
+				Size = UDim2.new(1,-140,0,14),
+				Text = tool.Name,
+				TextColor3 = Settings.Theme.Text,
+				TextSize = 13,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				TextXAlignment = Enum.TextXAlignment.Left
+			})
+			nameLabel.Parent = row
+
+			local meta = createSimple("TextLabel",{
+				BackgroundTransparency = 1,
+				AnchorPoint = Vector2.new(1,0),
+				Font = Enum.Font.SourceSans,
+				Position = UDim2.new(1,-8,0,2),
+				Size = UDim2.new(0,124,0,14),
+				Text = ("#%d  %s"):format(indexOf[tool] or 0,held and "in hand" or "backpack"),
+				TextColor3 = held and Settings.Theme.ListSelection or Color3.fromRGB(120,120,120),
+				TextSize = 10,
+				TextXAlignment = Enum.TextXAlignment.Right
+			})
+			meta.Parent = row
+
+			row.MouseButton1Click:Connect(function()
+				if Main.Unloaded then return end
+
+				local ok
+				if tool.Parent == character then
+					ok = unequipTool(tool)
+					setStatus(ok and ("Put " .. tool.Name .. " away.") or ("Could not put " .. tool.Name .. " away."))
+				else
+					ok = equipTool(tool)
+					setStatus(ok and ("Holding " .. tool.Name .. ".") or ("Could not hold " .. tool.Name .. "."))
+				end
+
+				refreshRows()
+				updateHeldLabel()
+			end)
+
+			row.MouseEnter:Connect(function()
+				row.BackgroundTransparency = 0
+			end)
+
+			row.MouseLeave:Connect(function()
+				row.BackgroundTransparency = 1
+			end)
+
+			row.Parent = listFrame
+			rows[#rows+1] = row
+		end
+
+		updateHeldLabel()
+
+		if #tools == 0 then
+			local empty = createSimple("TextLabel",{
+				BackgroundTransparency = 1,
+				Font = Enum.Font.SourceSans,
+				Position = UDim2.new(0,8,0,4),
+				Size = UDim2.new(1,-16,0,14),
+				Text = #allTools() == 0 and "no gears here, this game does not give you tools" or "nothing matches the search",
+				TextColor3 = Color3.fromRGB(128,128,128),
+				TextSize = 12,
+				TextXAlignment = Enum.TextXAlignment.Left
+			})
+			empty.Parent = listFrame
+			rows[#rows+1] = empty
+		end
+
+		if equipShownButton then
+			equipShownButton.Gui.Text = #tools > 0 and ("Hold shown (" .. #tools .. ")") or "Hold shown"
+		end
+	end
+
+	queueRefresh = function()
+		if refreshQueued then return end
+		refreshQueued = true
+
+		task.delay(0.15,function()
+			refreshQueued = false
+			if Main.Unloaded or not window then return end
+			refreshRows()
+		end)
+	end
+
+	local function watchContainer(container)
+		if not container or watchers[container] then return end
+
+		local list = {}
+		list[#list+1] = container.ChildAdded:Connect(function(child)
+			if child:IsA("Tool") then
+				lastSignature = nil
+				queueRefresh()
+			end
+		end)
+		list[#list+1] = container.ChildRemoved:Connect(function(child)
+			if child:IsA("Tool") then
+				lastSignature = nil
+				queueRefresh()
+			end
+		end)
+
+		watchers[container] = list
+	end
+
+	local function unwatchAll()
+		for _,list in pairs(watchers) do
+			for _,connection in pairs(list) do
+				pcall(function() connection:Disconnect() end)
+			end
+		end
+		watchers = {}
+	end
+
+	local function stopLock()
+		lock.running = false
+		lock.gen = lock.gen + 1
+		if lockButton then
+			lockButton.Gui.Text = "Lock: off"
+			lockButton.Gui.TextColor3 = Settings.Theme.Text
+		end
+	end
+
+	local function startLock(names,label)
+		lock.gen = lock.gen + 1
+		local gen = lock.gen
+		lock.running = true
+		lock.names = names
+
+		if lockButton then
+			lockButton.Gui.Text = "Lock: on"
+			lockButton.Gui.TextColor3 = Settings.Theme.ListSelection
+		end
+
+		task.spawn(function()
+			while lock.running and lock.gen == gen and not Main.Unloaded do
+				local ok, why = pcall(applySet,names,"exact")
+				if not ok then
+					warn("Gear Tools lock: " .. tostring(why))
+				end
+				task.wait(LOCK_INTERVAL)
+			end
+		end)
+
+		setStatus("Locked " .. label .. ", it gets re-applied every moment. Stop with Lock.")
+	end
+
+	GearTools.Init = function()
+		window = Lib.Window.new()
+		window:SetTitle("Gear Tools")
+		window:Resize(620,470)
+		GearTools.Window = window
+
+		local content = window.GuiElems.Content
+
+		searchBox = Lib.ViewportTextBox.new()
+		searchBox.Gui.Parent = content
+		searchBox.Position = UDim2.new(0,4,0,4)
+		searchBox.Size = UDim2.new(1,-190,0,20)
+		searchBox.TextBox.TextSize = 13
+		searchBox.TextBox.PlaceholderText = "search gears"
+
+		local searchPadding = Instance.new("UIPadding")
+		searchPadding.Parent = searchBox.Gui
+		searchPadding.PaddingLeft = UDim.new(0,5)
+
+		searchBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
+			if Main.Unloaded then return end
+			refreshRows()
+		end)
+
+		refreshButton = Lib.Button.new()
+		refreshButton.Gui.Parent = content
+		refreshButton.Gui.Position = UDim2.new(1,-182,0,4)
+		refreshButton.Gui.Size = UDim2.new(0,84,0,20)
+		refreshButton.Gui.TextSize = 12
+		refreshButton.Gui.Text = "Refresh"
+		refreshButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+			lastSignature = nil
+			refreshRows()
+			setStatus("Relisted your gears.")
+		end)
+
+		heldLabel = Lib.Label.new()
+		heldLabel.Gui.Parent = content
+		heldLabel.Gui.AnchorPoint = Vector2.new(1,0)
+		heldLabel.Gui.Position = UDim2.new(1,-4,0,6)
+		heldLabel.Gui.Size = UDim2.new(0,90,0,16)
+		heldLabel.Gui.Text = "held 0 / 0"
+		heldLabel.Gui.TextSize = 11
+		heldLabel.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		heldLabel.Gui.TextXAlignment = Enum.TextXAlignment.Right
+
+		equipShownButton = Lib.Button.new()
+		equipShownButton.Gui.Parent = content
+		equipShownButton.Gui.Position = UDim2.new(0,4,0,30)
+		equipShownButton.Gui.Size = UDim2.new(0,124,0,20)
+		equipShownButton.Gui.TextSize = 12
+		equipShownButton.Gui.Text = "Hold shown"
+		equipShownButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+
+			task.spawn(function()
+				local count = 0
+				for _,tool in pairs(shownTools()) do
+					if tool.Parent ~= plr.Character and equipTool(tool) then
+						count = count + 1
+						if count % 5 == 0 then task.wait() end
+					end
+				end
+				lastSignature = nil
+				refreshRows()
+				setStatus(("Now holding %d gear(s), %d in hand."):format(count,#heldTools()))
+			end)
+		end)
+
+		unequipShownButton = Lib.Button.new()
+		unequipShownButton.Gui.Parent = content
+		unequipShownButton.Gui.Position = UDim2.new(0,132,0,30)
+		unequipShownButton.Gui.Size = UDim2.new(0,132,0,20)
+		unequipShownButton.Gui.TextSize = 12
+		unequipShownButton.Gui.Text = "Put shown away"
+		unequipShownButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+
+			task.spawn(function()
+				local count = 0
+				for _,tool in pairs(shownTools()) do
+					if tool.Parent == plr.Character and unequipTool(tool) then
+						count = count + 1
+						if count % 5 == 0 then task.wait() end
+					end
+				end
+				lastSignature = nil
+				refreshRows()
+				setStatus(("Put %d gear(s) back in the backpack."):format(count))
+			end)
+		end)
+
+		lockButton = Lib.Button.new()
+		lockButton.Gui.Parent = content
+		lockButton.Gui.Position = UDim2.new(0,268,0,30)
+		lockButton.Gui.Size = UDim2.new(0,96,0,20)
+		lockButton.Gui.TextSize = 12
+		lockButton.Gui.Text = "Lock: off"
+		lockButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+
+			if lock.running then
+				stopLock()
+				setStatus("Lock off, the gears stay in your hands until you put them away.")
+				return
+			end
+
+			local names = {}
+			for _,tool in pairs(heldTools()) do names[#names+1] = tool.Name end
+			table.sort(names)
+
+			if #names == 0 then
+				setStatus("Hold a set first, then lock it.")
+				return
+			end
+
+			startLock(names,("%d gear(s)"):format(#names))
+		end)
+
+		local listPanel = createSimple("Frame",{
+			BackgroundColor3 = Settings.Theme.Main2,
+			BorderColor3 = Settings.Theme.Outline1,
+			Name = "GearList",
+			Position = UDim2.new(0,4,0,56),
+			Size = UDim2.new(1,-8,1,-160)
+		})
+		listPanel.Parent = content
+
+		listFrame = createSimple("ScrollingFrame",{
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			BottomImage = "",
+			CanvasSize = UDim2.new(0,0,0,0),
+			Name = "List",
+			Position = UDim2.new(0,4,0,4),
+			ScrollBarImageColor3 = Color3.fromRGB(70,70,70),
+			ScrollBarThickness = 6,
+			Size = UDim2.new(1,-8,1,-8),
+			TopImage = ""
+		})
+		listFrame.Parent = listPanel
+
+		local layout = Instance.new("UIListLayout")
+		layout.FillDirection = Enum.FillDirection.Vertical
+		layout.Padding = UDim.new(0,1)
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Parent = listFrame
+
+		nameBox = Lib.ViewportTextBox.new()
+		nameBox.Gui.Parent = content
+		nameBox.Position = UDim2.new(0,4,1,-96)
+		nameBox.Size = UDim2.new(0,170,0,20)
+		nameBox.TextBox.TextSize = 13
+		nameBox.TextBox.PlaceholderText = "set name"
+
+		local namePadding = Instance.new("UIPadding")
+		namePadding.Parent = nameBox.Gui
+		namePadding.PaddingLeft = UDim.new(0,5)
+
+		local saveButton = Lib.Button.new()
+		saveButton.Gui.Parent = content
+		saveButton.Gui.Position = UDim2.new(0,178,1,-96)
+		saveButton.Gui.Size = UDim2.new(0,92,0,20)
+		saveButton.Gui.TextSize = 12
+		saveButton.Gui.Text = "Save set"
+		saveButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+
+			local name = nameBox:GetText():gsub("^%s+",""):gsub("%s+$","")
+			if name == "" then
+				setStatus("Type a set name first.")
+				return
+			end
+
+			local names = {}
+			for _,tool in pairs(heldTools()) do names[#names+1] = tool.Name end
+			table.sort(names)
+
+			if #names == 0 then
+				setStatus("Nothing in hand, hold the gears you want before saving.")
+				return
+			end
+
+			sets[name:lower()] = names
+			local ok, why = saveSets()
+			setNameOptions()
+			setsDrop:SetSelected(name:lower())
+			setStatus(("Saved '%s' with %d gear(s)%s"):format(name,#names,ok and "." or (" (memory only: " .. tostring(why) .. ")")))
+		end)
+
+		local loadButton = Lib.Button.new()
+		loadButton.Gui.Parent = content
+		loadButton.Gui.Position = UDim2.new(0,274,1,-96)
+		loadButton.Gui.Size = UDim2.new(0,76,0,20)
+		loadButton.Gui.TextSize = 12
+		loadButton.Gui.Text = "Load"
+		loadButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+
+			local name = setsDrop.Selected
+			if not name then
+				setStatus("Pick a saved set first.")
+				return
+			end
+
+			task.spawn(function()
+				local equipped = select(1,applySet(sets[name] or {},"exact"))
+				lastSignature = nil
+				refreshRows()
+				setStatus(("Loaded '%s', %d gear(s) in hand."):format(name,equipped))
+			end)
+		end)
+
+		local deleteButton = Lib.Button.new()
+		deleteButton.Gui.Parent = content
+		deleteButton.Gui.Position = UDim2.new(0,354,1,-96)
+		deleteButton.Gui.Size = UDim2.new(0,76,0,20)
+		deleteButton.Gui.TextSize = 12
+		deleteButton.Gui.Text = "Delete"
+		deleteButton.OnClick:Connect(function()
+			if Main.Unloaded then return end
+
+			local name = setsDrop.Selected
+			if not name then
+				setStatus("Pick a saved set first.")
+				return
+			end
+
+			sets[name] = nil
+			saveSets()
+			setNameOptions()
+			setStatus(("Deleted '%s'."):format(name))
+		end)
+
+		setsDrop = Lib.DropDown.new()
+		setsDrop.Gui.Parent = content
+		setsDrop.Gui.AnchorPoint = Vector2.new(1,0)
+		setsDrop.Gui.Position = UDim2.new(1,-4,1,-96)
+		setsDrop.Gui.Size = UDim2.new(0,168,0,20)
+		setsDrop.GuiElems.Label.Gui.TextSize = 13
+		setsDrop.CanBeEmpty = true
+		setsDrop.OnSelect:Connect(function()
+			if Main.Unloaded then return end
+			if setsDrop.Selected then
+				setStatus("Ready to load '" .. setsDrop.Selected .. "'.")
+			end
+		end)
+
+		statusLabel = Lib.Label.new()
+		statusLabel.Gui.Parent = content
+		statusLabel.Gui.AnchorPoint = Vector2.new(0,1)
+		statusLabel.Gui.Position = UDim2.new(0,4,1,0)
+		statusLabel.Gui.Size = UDim2.new(1,-8,0,16)
+		statusLabel.Gui.Text = "click a gear to hold it, click again to put it away"
+		statusLabel.Gui.TextSize = 11
+		statusLabel.Gui.TextColor3 = Color3.fromRGB(140,140,140)
+		statusLabel.Gui.TextTruncate = Enum.TextTruncate.AtEnd
+
+		loadSets()
+		setNameOptions()
+
+		watchContainer(plr.Character)
+		watchContainer(plr:FindFirstChild("Backpack"))
+
+		connections[#connections+1] = plr.CharacterAdded:Connect(function(character)
+			task.wait(0.4)
+			if Main.Unloaded then return end
+
+			unwatchAll()
+			watchContainer(character)
+			watchContainer(plr:FindFirstChild("Backpack"))
+			lastSignature = nil
+			refreshRows()
+
+			-- a respawn drops everything, so put a locked set back on
+			if lock.running and lock.names then
+				task.spawn(function() applySet(lock.names,"exact") end)
+			end
+		end)
+
+		connections[#connections+1] = RunService.Heartbeat:Connect(function()
+			if Main.Unloaded then return end
+
+			local now = os.clock()
+			if now - (GearTools.LastSync or 0) < SYNC_INTERVAL then return end
+			GearTools.LastSync = now
+
+			local signature = signatureText()
+			if signature ~= lastSignature then
+				lastSignature = signature
+				queueRefresh()
+			end
+		end)
+
+		refreshRows()
+
+		window.OnActivate:Connect(function()
+			lastSignature = nil
+			refreshRows()
+		end)
+	end
+
+	GearTools.Unload = function()
+		stopLock()
+		lock.names = nil
+
+		for _,connection in pairs(connections) do
+			pcall(function() connection:Disconnect() end)
+		end
+		connections = {}
+
+		unwatchAll()
+
+		for _,row in pairs(rows) do
+			pcall(function() row:Destroy() end)
+		end
+		rows = {}
+
+		if window then
+			pcall(function() window:Hide() end)
+		end
+	end
+
+	return GearTools
+end
+
+return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+end,
 ["PlayerTools"] = function()
 --[[
 	Player Tools Module
@@ -18090,7 +18870,7 @@ end
 local isFsSupported = readfile and writefile and isfile and isfolder and listfiles and delfile and delfolder
 
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire, ServerHop, SubplaceBrowser, RemoteSpy, PlayerTools--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
+local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, ClickFire, ServerHop, SubplaceBrowser, RemoteSpy, PlayerTools, GearTools--[[, SecretServicePanel]], DefaultSettings, Notebook, Serializer, Lib local ggv = getgenv or nil
 local API, RMD
 
 -- Default Settings
@@ -18219,11 +18999,11 @@ end
 Main = (function()
 	local Main = {}
 
-	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire","ServerHop","SubplaceBrowser","RemoteSpy","PlayerTools"}
+	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Console","SaveInstance","ModelViewer","ClickFire","ServerHop","SubplaceBrowser","RemoteSpy","PlayerTools","GearTools"}
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.29" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.30" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
@@ -18468,6 +19248,7 @@ Main = (function()
 		SubplaceBrowser = Apps.SubplaceBrowser
 		RemoteSpy = Apps.RemoteSpy
 		PlayerTools = Apps.PlayerTools
+		GearTools = Apps.GearTools
 		Notebook = Apps.Notebook
 		
 		--SecretServicePanel = Apps.SecretServicePanel
@@ -18483,6 +19264,7 @@ Main = (function()
 			SubplaceBrowser = SubplaceBrowser,
 			RemoteSpy = RemoteSpy,
 			PlayerTools = PlayerTools,
+			GearTools = GearTools,
 			Notebook = Notebook,
 			
 			--SecretServicePanel = SecretServicePanel,
@@ -19494,6 +20276,8 @@ Main = (function()
 
 		Main.CreateApp({Name = "Player Tools", IconMap = Explorer.ClassIcons, Icon = "Player", Window = PlayerTools.Window})
 
+		Main.CreateApp({Name = "Gear Tools", IconMap = Explorer.ClassIcons, Icon = "Tool", Window = GearTools.Window})
+
 		--Main.CreateApp({Name = "Secret Service Panel", IconMap = Main.LargeIcons, Icon = "Output", Window = SecretServicePanel.Window})
 
 
@@ -19865,6 +20649,9 @@ Main = (function()
 		pcall(function()
 			if Apps.PlayerTools and Apps.PlayerTools.Unload then Apps.PlayerTools.Unload() end
 		end)
+		pcall(function()
+			if Apps.GearTools and Apps.GearTools.Unload then Apps.GearTools.Unload() end
+		end)
 
 		if Main.MainGuiMouseEvent then
 			pcall(function() Main.MainGuiMouseEvent:Disconnect() end)
@@ -20021,6 +20808,7 @@ Main = (function()
 		SubplaceBrowser.Init()
 		RemoteSpy.Init()
 		PlayerTools.Init()
+		GearTools.Init()
 		
 		--SecretServicePanel.Init()
 		
