@@ -17187,11 +17187,11 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.24" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.25" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
-	-- must answer without a login: a private repo returns 404 inside the game
-	Main.VersionUrl = "https://raw.githubusercontent.com/floams/dexium/main/version.txt"
+	-- read from the small public mirror, this repo itself stays private
+	Main.VersionUrl = "https://raw.githubusercontent.com/floams/dexium-version/main/version.txt"
 	Main.SourceUrl = "https://raw.githubusercontent.com/floams/dexium/main/main.lua"
 	Main.LatestVersion = nil
 	Main.VersionChecked = false

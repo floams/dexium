@@ -1,0 +1,66 @@
+name: Publish version
+
+# Keeps floams/dexium-version in step with version.txt in this repo.
+# Needs a fine-grained token with "Contents: read and write" on the public
+# repo, stored here as the VERSION_SYNC_TOKEN secret.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - version.txt
+  workflow_dispatch:
+
+concurrency:
+  group: publish-version
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push version.txt to the public repo
+        env:
+          TOKEN: ${{ secrets.VERSION_SYNC_TOKEN }}
+          TARGET: floams/dexium-version
+        run: |
+          set -euo pipefail
+
+          version="$(tr -d '[:space:]' < version.txt)"
+          if [ -z "$version" ]; then
+            echo "::error::version.txt is empty"
+            exit 1
+          fi
+
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::VERSION_SYNC_TOKEN is not set, skipping the public version update"
+            exit 0
+          fi
+
+          auth=(-H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json")
+
+          if ! curl -sS -o /dev/null -f "${auth[@]}" "https://api.github.com/repos/$TARGET"; then
+            echo "::warning::cannot reach $TARGET, create the public repo or check the token"
+            exit 0
+          fi
+
+          api="https://api.github.com/repos/$TARGET/contents/version.txt"
+          current="$(curl -sS "${auth[@]}" "$api")"
+          sha="$(printf '%s' "$current" | jq -r '.sha // empty')"
+          existing="$(printf '%s' "$current" | jq -r '.content // empty' | base64 -d 2>/dev/null | tr -d '[:space:]' || true)"
+
+          if [ "$existing" = "$version" ]; then
+            echo "Public repo is already on $version"
+            exit 0
+          fi
+
+          payload="$(jq -n \
+            --arg message "Update version to $version" \
+            --arg content "$(printf '%s\n' "$version" | base64 -w0)" \
+            --arg sha "$sha" \
+            '{message: $message, content: $content} + (if $sha == "" then {} else {sha: $sha} end)')"
+
+          curl -sS -X PUT "${auth[@]}" --data "$payload" "$api" > /dev/null
+          echo "Published $version to $TARGET"
