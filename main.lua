@@ -2611,7 +2611,7 @@ local function main()
 			return str
 		end
 
-		context:Register("COPY_PATH",{Name = "Copy Path", IconMap = Explorer.LegacyClassIcons, Icon = 50, OnClick = function()
+		context:Register("COPY_PATH",{Name = "Copy Path", IconMap = Explorer.LegacyClassIcons, Icon = 50, Shortcut = "Ctrl+P", OnClick = function()
 			local sList = selection.List
 			if #sList == 1 then
 				env.setclipboard(clth(Explorer.GetInstancePath(sList[1].Obj)))
@@ -19222,7 +19222,7 @@ Main = (function()
 	Main.Elevated = false
 	Main.AllowDraggableOnMobile = true
 	Main.MissingEnv = {}
-	Main.Version = "2.38" -- bumped by 0.01 with every update, keep version.txt in step
+	Main.Version = "2.39" -- bumped by 0.01 with every update, keep version.txt in step
 	Main.SettingsPath = "DexiumExplorer/dexsettings.json"
 	Main.RepoUrl = "https://github.com/floams/dexium"
 	-- read from the small public mirror, this repo itself stays private
@@ -20477,6 +20477,47 @@ Main = (function()
 			else if cptsOnMouseClick ~= nil then cptsOnMouseClick:Disconnect() cptsOnMouseClick = nil Main.ClickPartConnection = nil end end
 		end})
 
+		Main.CreateApp({Name = "Click part to copy path", IconMap = Main.MiscIcons, Icon = "Copy", OnClick = function(callback)
+			if callback then
+				if Main.CopyPathClickConnection then return end
+
+				Main.CopyPathClickConnection = Main.Mouse.Button1Down:Connect(function()
+					local object = Main.Mouse.Target
+					if not object then return end
+
+					local path = Main.GetPath(object)
+					if not path then return end
+
+					Main.ShowCopyStatus(path,Main.CopyText(path))
+				end)
+			elseif Main.CopyPathClickConnection then
+				pcall(function() Main.CopyPathClickConnection:Disconnect() end)
+				Main.CopyPathClickConnection = nil
+			end
+		end})
+
+		-- ctrl+p copies the explorer selection from anywhere, nothing else in Dex
+		-- uses that key
+		pcall(function()
+			local uis = service.UserInputService
+
+			Main.CopyPathKeyConnection = uis.InputBegan:Connect(function(input,processed)
+				if processed or Main.Unloaded then return end
+				if input.KeyCode ~= Enum.KeyCode.P then return end
+				if not Lib.IsCtrlDown() then return end
+
+				local box = uis:GetFocusedTextBox()
+				if box then return end
+
+				local text,ok = Main.CopySelectionPath()
+				if text then
+					Main.ShowCopyStatus(text,ok)
+				else
+					Main.ShowCopyStatus("Nothing selected in the Explorer",false,"Pick a part in the Explorer, then press Ctrl+P")
+				end
+			end)
+		end)
+
 		Main.CreateApp({Name = "Notepad", IconMap = Main.LargeIcons, Icon = "Script_Viewer", Window = ScriptViewer.Window})
 		
 		Main.CreateApp({Name = "Console", IconMap = Main.LargeIcons, Icon = "Output", Window = Console.Window})
@@ -20680,6 +20721,138 @@ Main = (function()
 		task.delay(12,dismiss)
 	end
 
+	-- clipboard names move around between executors, so try every one of them
+	Main.CopyText = function(text)
+		if type(text) ~= "string" or text == "" then return false end
+
+		local writers = {writeclipboard,setclipboard,env.setclipboard,toclipboard,syn and syn.setclipboard}
+		local wrote = false
+
+		for i = 1,#writers do
+			local writer = writers[i]
+			if type(writer) == "function" and pcall(writer,text) then
+				wrote = true
+				break
+			end
+		end
+
+		return wrote
+	end
+
+	-- the script path for an instance, tidied the same way the explorer's own
+	-- Copy Path does it: workspace instead of GetService("Workspace"), and
+	-- LocalPlayer instead of your own name
+	Main.GetPath = function(obj)
+		if not obj then return nil end
+
+		local ok,path = pcall(Explorer.GetInstancePath,obj)
+		if not ok or type(path) ~= "string" or path == "" then return nil end
+
+		path = path:gsub('^game:GetService%\("Workspace"%\)','workspace',1)
+
+		local me = plr.Name
+		local prefix = 'game:GetService("Players").' .. me
+		if path:sub(1,#prefix) == prefix then
+			path = path:gsub('game:GetService%\("Players"%)\\.' .. me,'game:GetService("Players").LocalPlayer',1)
+		end
+
+		return path
+	end
+
+	-- copies whatever the explorer has selected, one path or a table of them
+	Main.CopySelectionPath = function()
+		local sList = (Explorer.Selection and Explorer.Selection.List) or {}
+		if #sList == 0 then return nil end
+
+		local text
+		if #sList == 1 then
+			text = Main.GetPath(sList[1].Obj)
+		else
+			local lines = {"{"}
+			for i = 1,#sList do
+				local path = Main.GetPath(sList[i].Obj)
+				if path then lines[#lines+1] = "\t" .. path .. "," end
+			end
+			lines[#lines+1] = "}"
+			text = table.concat(lines,"\n")
+		end
+
+		if not text then return nil end
+
+		return text,Main.CopyText(text)
+	end
+
+	-- a small card so a copy always says whether it landed
+	local copyStatus = nil
+	Main.ShowCopyStatus = function(text,ok,hint)
+		if Main.Unloaded then return end
+
+		if copyStatus then
+			pcall(function() copyStatus:Destroy() end)
+			copyStatus = nil
+		end
+
+		local holder = createSimple("ScreenGui",{
+			DisplayOrder = Main.DisplayOrders.Core + 2,
+			IgnoreGuiInset = true,
+			Name = "DexiumCopyStatus",
+			ResetOnSpawn = false
+		})
+
+		local card = createSimple("Frame",{
+			AnchorPoint = Vector2.new(0.5,1),
+			BackgroundColor3 = Settings.Theme.Main1,
+			BorderColor3 = Settings.Theme.Outline1,
+			BorderSizePixel = 1,
+			Name = "Card",
+			Position = UDim2.new(0.5,0,1,-16),
+			Size = UDim2.new(0,430,0,46)
+		})
+		card.Parent = holder
+
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0,4)
+		corner.Parent = card
+
+		local label = createSimple("TextLabel",{
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			Name = "Path",
+			Position = UDim2.new(0,10,0,0),
+			Size = UDim2.new(1,-20,0,28),
+			Text = text,
+			TextColor3 = ok and Settings.Theme.Text or Color3.fromRGB(232,140,140),
+			TextSize = 12,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Bottom
+		})
+		label.Parent = card
+
+		local hintLabel = createSimple("TextLabel",{
+			BackgroundTransparency = 1,
+			Font = Enum.Font.SourceSans,
+			Name = "Hint",
+			Position = UDim2.new(0,10,0,28),
+			Size = UDim2.new(1,-20,0,14),
+			Text = hint or (ok and "Path copied to your clipboard" or "No clipboard available here, the path is above"),
+			TextColor3 = ok and Color3.fromRGB(140,200,150) or Color3.fromRGB(226,168,92),
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left
+		})
+		hintLabel.Parent = card
+
+		Main.ShowGui(holder)
+		copyStatus = holder
+
+		task.delay(2.5,function()
+			if copyStatus == holder then
+				pcall(function() holder:Destroy() end)
+				copyStatus = nil
+			end
+		end)
+	end
+
 	Main.CheckVersion = function()
 		if Main.Unloaded then return end
 
@@ -20880,6 +21053,16 @@ Main = (function()
 		if Main.ClickPartConnection then
 			pcall(function() Main.ClickPartConnection:Disconnect() end)
 			Main.ClickPartConnection = nil
+		end
+
+		if Main.CopyPathClickConnection then
+			pcall(function() Main.CopyPathClickConnection:Disconnect() end)
+			Main.CopyPathClickConnection = nil
+		end
+
+		if Main.CopyPathKeyConnection then
+			pcall(function() Main.CopyPathKeyConnection:Disconnect() end)
+			Main.CopyPathKeyConnection = nil
 		end
 
 		for gui in pairs(Main.CreatedGuis) do
